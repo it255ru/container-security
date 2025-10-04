@@ -1,51 +1,50 @@
-FROM alpine:3.20.0 AS nginx-builder
+# Используем минимальный образ Alpine и устанавливаем nginx вручную с фиксированными версиями
+FROM alpine:3.20.0 AS builder
 
-# Скачиваем и компилируем nginx без ненужных модулей
-RUN apk add --no-cache build-base pcre-dev zlib-dev openssl-dev && \
-    wget -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
-    tar -xzf nginx.tar.gz && \
-    cd nginx-1.24.0 && \
-    ./configure \
-        --prefix=/etc/nginx \
-        --sbin-path=/usr/sbin/nginx \
-        --modules-path=/usr/lib/nginx/modules \
-        --conf-path=/etc/nginx/nginx.conf \
-        --error-log-path=/var/log/nginx/error.log \
-        --http-log-path=/var/log/nginx/access.log \
-        --pid-path=/var/run/nginx.pid \
-        --lock-path=/var/run/nginx.lock \
-        --http-client-body-temp-path=/var/cache/nginx/client_temp \
-        --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
-        --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
-        --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
-        --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
-        --user=nginx \
-        --group=nginx \
-        --with-http_ssl_module \
-        --with-http_realip_module \
-        --with-http_gzip_static_module \
-        --without-http_autoindex_module \
-        --without-http_ssi_module \
-        --without-http_scgi_module \
-        --without-http_uwsgi_module \
-        --without-http_fastcgi_module && \
-    make && make install
+# Устанавливаем метаданные
+LABEL maintainer="security-team@example.com"
+LABEL description="Ultra-secure nginx server"
 
-FROM alpine:3.20.0
+# Устанавливаем конкретные версии пакетов и обновляем систему
+RUN apk add --no-cache --update \
+    nginx=1.24.0-r12 \
+    openssl=3.3.1-r0 \
+    && apk upgrade --no-cache --available \
+    && rm -rf /var/cache/apk/*
 
-RUN addgroup -S nginx && adduser -S -D -H -G nginx nginx
+# Создаем необходимые директории
+RUN mkdir -p /var/run/nginx /var/tmp/nginx /var/log/nginx /var/www/html \
+    && chmod -R 755 /var/run/nginx /var/tmp/nginx /var/log/nginx
 
-COPY --from=nginx-builder /usr/sbin/nginx /usr/sbin/nginx
-COPY --from=nginx-builder /etc/nginx /etc/nginx
+# Создаем non-root пользователя
+RUN addgroup -g 1001 -S nginxgroup && \
+    adduser -S -D -H -u 1001 -G nginxgroup -s /sbin/nologin nginxuser
 
-RUN mkdir -p /var/log/nginx /var/cache/nginx && \
-    chown -R nginx:nginx /var/log/nginx /var/cache/nginx
-
+# Копируем минимальную конфигурацию
 COPY nginx-minimal.conf /etc/nginx/nginx.conf
-COPY --chown=nginx:nginx html /var/www/html
+COPY --chown=nginxuser:nginxgroup index.html /var/www/html/index.html
 
-USER nginx
+# Устанавливаем правильные права
+RUN chown -R nginxuser:nginxgroup /var/run/nginx /var/tmp/nginx /var/log/nginx /etc/nginx /var/www/html
 
+# Финальный образ - используем distroless или scratch для максимальной безопасности
+FROM gcr.io/distroless/static:nonroot
+
+# Копируем только необходимые бинарные файлы из builder стадии
+COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
+COPY --from=builder /etc/nginx /etc/nginx
+COPY --from=builder /var/www/html /var/www/html
+COPY --from=builder /var/run/nginx /var/run/nginx
+COPY --from=builder /var/tmp/nginx /var/tmp/nginx
+COPY --from=builder /var/log/nginx /var/log/nginx
+COPY --from=builder /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=builder /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+COPY --from=builder /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+COPY --from=builder /usr/lib/libz.so.1 /usr/lib/libz.so.1
+COPY --from=builder /usr/lib/libpcre2-8.so.0 /usr/lib/libpcre2-8.so.0
+
+# Порт для non-root пользователя
 EXPOSE 8080
 
-CMD ["nginx", "-g", "daemon off;"]
+# Запускаем nginx
+CMD ["/usr/sbin/nginx", "-g", "daemon off;"]
