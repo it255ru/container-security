@@ -27,35 +27,30 @@ jobs:
       - name: Build Docker image
         run: docker build -t myapp:ci .
 
-      # --- 2. Проверка Dockerfile (lint) ---
+      # --- 1. Проверка Dockerfile (lint) ---
       - name: Dockerfile Lint (Hadolint)
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-          format: tty
-
-      # --- 2a. Авто-обновление checklist с любыми предупреждениями Hadolint ---
-      - name: Update checklist with Hadolint warnings
-        working-directory: ./  # корень репозитория, где находится Dockerfile и checklist.csv
         run: |
-          # Проверяем, существует ли checklist.csv, если нет — создаём
+          # Создаём файл для вывода
+          hadolint Dockerfile -f json > hadolint.json || true
+      
+      # --- 1a. Авто-обновление checklist с любыми предупреждениями ---
+      - name: Update checklist with Hadolint warnings
+        run: |
+          # Создаём checklist, если не существует
           if [ ! -f checklist.csv ]; then
             echo "Checklist" > checklist.csv
           fi
       
-          # Записываем вывод Hadolint во временный файл
-          hadolint Dockerfile > hadolint-output.txt || true
-      
-          # Если есть предупреждения
-          if [ -s hadolint-output.txt ]; then
+          # Проверяем, есть ли предупреждения
+          if [ -s hadolint.json ]; then
             echo "Processing Hadolint warnings into checklist.csv..."
-            while read -r line; do
-              code=$(echo "$line" | awk '{print $1}')
-              # Добавляем только если такого кода ещё нет
-              if ! grep -q "$code" checklist.csv; then
-                echo "☐ $line" >> checklist.csv
+            # Для каждого предупреждения добавляем строку
+            jq -r '.[] | "☐ \(.code) \(.line): \(.message)"' hadolint.json | while read -r line; do
+              # Добавляем только если ещё нет в checklist
+              if ! grep -Fq "$line" checklist.csv; then
+                echo "$line" >> checklist.csv
               fi
-            done < hadolint-output.txt
+            done
           else
             echo "No Hadolint warnings found."
           fi
