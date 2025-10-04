@@ -1,9 +1,9 @@
 name: Dockerfile Security Audit
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
+    branches: [ main ]
+  push:
     branches: [ main ]
 
 jobs:
@@ -11,45 +11,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # --- 0. Checkout repository ---
+      # --- 0. Checkout ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- 1. Hadolint Lint ---
+      # --- 1. Hadolint ---
       - name: Dockerfile Lint (Hadolint)
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-          format: json
-
-      # --- 1a. Format Hadolint output for students ---
-      - name: Hadolint Summary
         run: |
-          echo "🔹 Hadolint summary:"
-          if [ -f Dockerfile ]; then
-            hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' || echo "✅ No issues found"
+          echo "🔹 Checking Dockerfile with Hadolint..."
+          HADOLINT_OUTPUT=$(hadolint Dockerfile -f json || true)
+          if [ -z "$HADOLINT_OUTPUT" ] || [ "$HADOLINT_OUTPUT" = "[]" ]; then
+            echo "✅ No Hadolint issues found."
           else
-            echo "⚠️ Dockerfile not found"
+            echo "$HADOLINT_OUTPUT" | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"'
+            exit 1
           fi
 
       # --- 2. Build Docker image ---
       - name: Build Docker image
         run: docker build -t student-app:ci .
 
-      # --- 3. Trivy Vulnerability Scan ---
+      # --- 3. Trivy scan ---
       - name: Trivy Vulnerability Scan
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: student-app:ci
-          format: table
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      # --- 4. Final Summary ---
-      - name: Summary
         run: |
-          echo "-----------------------------"
-          echo "Dockerfile Audit Completed"
-          echo "Check Hadolint summary above for Dockerfile issues."
-          echo "Check Trivy output above for vulnerabilities."
-          echo "-----------------------------"
+          echo "🔹 Scanning Docker image with Trivy..."
+          trivy image --severity CRITICAL,HIGH --ignore-unfixed student-app:ci || true
+          # Проверяем наличие уязвимостей через exit code
+          VULNS=$(trivy image --severity CRITICAL,HIGH --ignore-unfixed -f json student-app:ci | jq '.Results[].Vulnerabilities | select(.!=null) | length')
+          if [ "$VULNS" -gt 0 ]; then
+            echo "❌ Found $VULNS CRITICAL/HIGH vulnerabilities in image"
+            exit 1
+          else
+            echo "✅ No critical/high vulnerabilities found."
+          fi
