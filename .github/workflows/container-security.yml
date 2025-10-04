@@ -59,10 +59,10 @@ jobs:
 
       # --- 4. Проверка Kubernetes манифестов ---
       - name: Validate Kubernetes manifests
-        if: hashFiles('k8s/**/*.yaml') != ''
-        uses: docker://ghcr.io/instrumenta/kubeval:latest
+        uses: instrumenta/kubeval-action@v1
         with:
-          args: k8s/**/*.yaml
+          files: k8s/**/*.yaml
+          version: v0.16.1
 
       # --- 5. Генерация SBOM (Syft) ---
       - name: Generate SBOM (Syft)
