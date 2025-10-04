@@ -9,36 +9,29 @@ LABEL description="Production ready application"
 ARG NODE_ENV=production
 ENV NODE_ENV=${NODE_ENV}
 
-# Создаем non-root пользователя
+# Создаем non-root пользователя и устанавливаем рабочую директорию в одном RUN
 RUN addgroup -g 1001 -S appgroup && \
-    adduser -S appuser -u 1001 -G appgroup
+    adduser -S appuser -u 1001 -G appgroup && \
+    mkdir -p /app && \
+    chown -R appuser:appgroup /app
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
 # Копируем файлы зависимостей
-COPY package*.json ./
-COPY pnpm-lock.yaml ./
+COPY --chown=appuser:appgroup package*.json ./
+COPY --chown=appuser:appgroup pnpm-lock.yaml ./
 
-# Устанавливаем зависимости и очищаем кеш
+# Устанавливаем зависимости, собираем приложение и очищаем кеш в одном RUN
 RUN npm install -g pnpm@9.0.0 && \
     pnpm install --frozen-lockfile --prod && \
+    if [ -f "prisma/schema.prisma" ]; then npx prisma generate; fi && \
+    npm run build && \
     npm cache clean --force && \
-    rm -rf /tmp/*
+    rm -rf /tmp/* /root/.npm
 
-# Копируем исходный код
+# Копируем исходный код с правильными правами
 COPY --chown=appuser:appgroup . .
-
-# Генерируем Prisma клиент (если используется)
-RUN if [ -f "prisma/schema.prisma" ]; then \
-      npx prisma generate; \
-    fi
-
-# Собираем приложение
-RUN npm run build
-
-# Меняем владельца файлов
-RUN chown -R appuser:appgroup /app
 
 # Переключаемся на non-root пользователя
 USER appuser
