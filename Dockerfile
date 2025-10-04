@@ -1,8 +1,15 @@
 FROM alpine:3.20.0 AS nginx-builder
 
+# Устанавливаем рабочий каталог
+WORKDIR /tmp
+
 # Скачиваем и компилируем nginx без ненужных модулей
-RUN apk add --no-cache build-base pcre-dev zlib-dev openssl-dev && \
-    wget -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
+RUN apk add --no-cache \
+        build-base=0.5-r3 \
+        pcre-dev=8.45-r3 \
+        zlib-dev=1.2.13-r1 \
+        openssl-dev=3.1.4-r0 && \
+    wget --progress=dot:giga -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
     tar -xzf nginx.tar.gz && \
     cd nginx-1.24.0 && \
     ./configure \
