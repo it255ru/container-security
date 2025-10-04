@@ -36,17 +36,22 @@ jobs:
 
       # --- 2a. Авто-обновление checklist с любыми предупреждениями Hadolint ---
       - name: Update checklist with Hadolint warnings
+        working-directory: ./  # корень репозитория, где находится Dockerfile и checklist.csv
         run: |
-          # Получаем все предупреждения Hadolint
+          # Проверяем, существует ли checklist.csv, если нет — создаём
+          if [ ! -f checklist.csv ]; then
+            echo "Checklist" > checklist.csv
+          fi
+      
+          # Записываем вывод Hadolint во временный файл
           hadolint Dockerfile > hadolint-output.txt || true
-
-          # Проверяем, есть ли предупреждения
+      
+          # Если есть предупреждения
           if [ -s hadolint-output.txt ]; then
             echo "Processing Hadolint warnings into checklist.csv..."
             while read -r line; do
-              # Извлекаем код предупреждения (например DL3007)
               code=$(echo "$line" | awk '{print $1}')
-              # Проверяем, что такого пункта ещё нет в checklist.csv
+              # Добавляем только если такого кода ещё нет
               if ! grep -q "$code" checklist.csv; then
                 echo "☐ $line" >> checklist.csv
               fi
