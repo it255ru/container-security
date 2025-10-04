@@ -1,13 +1,14 @@
-FROM node:20-alpine as build
+# A basic apache server. To use either add or bind mount content under /var/www
+FROM ubuntu:12.04
 
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
+MAINTAINER Kimbro Staken version: 0.1
 
-FROM nginx:stable-alpine
-COPY --from=build /app/build /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/nginx.conf
+RUN apt-get update && apt-get install -y apache2 && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV APACHE_RUN_USER www-data
+ENV APACHE_RUN_GROUP www-data
+ENV APACHE_LOG_DIR /var/log/apache2
+
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+
+CMD ["/usr/sbin/apache2", "-D", "FOREGROUND"]
