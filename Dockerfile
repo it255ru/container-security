@@ -59,5 +59,11 @@ USER nginxuser
 # Открываем порт
 EXPOSE 8080
 
+COPY security-scan.sh /usr/local/bin/security-scan.sh
+RUN chmod +x /usr/local/bin/security-scan.sh
+
+# Запускаем проверки безопасности при старте
+CMD ["sh", "-c", "/usr/local/bin/security-scan.sh && nginx -g 'daemon off;'"]
+
 # Запускаем nginx
 CMD ["nginx", "-g", "daemon off;"]
