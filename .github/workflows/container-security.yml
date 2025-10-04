@@ -30,46 +30,23 @@ jobs:
       # --- 1. Проверка Dockerfile (lint) ---
       - name: Dockerfile Lint (Hadolint)
         run: |
-          # Создаём файл для вывода
           hadolint Dockerfile -f json > hadolint.json || true
-      
-      # --- 1a. Авто-обновление checklist с любыми предупреждениями ---
+
+      # --- 1a. Авто-обновление checklist с предупреждениями Hadolint ---
       - name: Update checklist with Hadolint warnings
         run: |
-          # Создаём checklist, если не существует
           if [ ! -f checklist.csv ]; then
             echo "Checklist" > checklist.csv
           fi
-      
-          # Проверяем, есть ли предупреждения
           if [ -s hadolint.json ]; then
-            echo "Processing Hadolint warnings into checklist.csv..."
-            # Для каждого предупреждения добавляем строку
             jq -r '.[] | "☐ \(.code) \(.line): \(.message)"' hadolint.json | while read -r line; do
-              # Добавляем только если ещё нет в checklist
               if ! grep -Fq "$line" checklist.csv; then
                 echo "$line" >> checklist.csv
               fi
             done
-          else
-            echo "No Hadolint warnings found."
-          fi
-          
-      - name: Update checklist with Trivy vulnerabilities
-        run: |
-          if [ -f trivy-results.sarif ]; then
-            echo "Processing Trivy vulnerabilities into checklist.csv..."
-            # Парсим SARIF и добавляем в checklist
-            jq -r '.runs[].results[] | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
-              if ! grep -Fq "$line" checklist.csv; then
-                echo "$line" >> checklist.csv
-              fi
-            done
-          else
-            echo "Trivy SARIF report not found"
           fi
 
-      # --- 3. Сканирование уязвимостей ---
+      # --- 2. Сканирование уязвимостей ---
       - name: Vulnerability Scan (Trivy)
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -81,6 +58,21 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 1
 
+      # --- 2a. Обновление checklist с уязвимостями Trivy ---
+      - name: Update checklist with Trivy vulnerabilities
+        run: |
+          if [ ! -f checklist.csv ]; then
+            echo "Checklist" > checklist.csv
+          fi
+          if [ -f trivy-results.sarif ]; then
+            jq -r '.runs[].results[] | select(.level=="high" or .level=="critical") | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
+              if ! grep -Fq "$line" checklist.csv; then
+                echo "$line" >> checklist.csv
+              fi
+            done
+          fi
+
+      # --- 3. Upload Trivy SARIF to GitHub Security tab ---
       - name: Upload Trivy results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         with:
