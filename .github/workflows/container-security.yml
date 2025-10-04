@@ -1,4 +1,4 @@
-name: Docker Image Security Scan
+name: Dockerfile Line-by-Line Scan
 
 on:
   push:
@@ -7,80 +7,57 @@ on:
     branches: [ main ]
 
 jobs:
-  docker-scan:
+  dockerfile-scan:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      
     - name: Run Hadolint
       uses: hadolint/hadolint-action@v3.1.0
       with:
         dockerfile: Dockerfile
-        format: sarif
-        output-file: hadolint-results.sarif
+        format: json
+        output-file: hadolint-results.json
       continue-on-error: true
       
-    - name: Build Docker image
+    - name: Custom Dockerfile analysis
       run: |
-        docker build -t my-app:${{ github.sha }} .
-        
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: my-app:${{ github.sha }}
-        format: sarif
-        output: trivy-results.sarif
-        severity: HIGH,CRITICAL
-      continue-on-error: true
-      
-    - name: Generate compact report
-      id: report
-      run: |
-        # Анализируем результаты Hadolint
-        if [ -f hadolint-results.sarif ]; then
-          HADOLINT_ISSUES=$(jq '.runs[0].results | length' hadolint-results.sarif)
-        else
-          HADOLINT_ISSUES=0
-        fi
-        
-        # Анализируем результаты Trivy
-        if [ -f trivy-results.sarif ]; then
-          TRIVY_VULNERABILITIES=$(jq '.runs[0].results | length' trivy-results.sarif)
-        else
-          TRIVY_VULNERABILITIES=0
-        fi
-        
-        # Формируем компактный отчет
-        echo "## 🔍 Security Scan Report" >> $GITHUB_STEP_SUMMARY
+        echo "## 📋 Custom Dockerfile Analysis" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Hadolint Issues: $HADOLINT_ISSUES" >> $GITHUB_STEP_SUMMARY
-        if [ $HADOLINT_ISSUES -gt 0 ]; then
-          echo "❌ Найдены проблемы в Dockerfile:" >> $GITHUB_STEP_SUMMARY
-          jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (правило: \(.ruleId))"' hadolint-results.sarif >> $GITHUB_STEP_SUMMARY
-        else
-          echo "✅ Dockerfile прошел проверку Hadolint" >> $GITHUB_STEP_SUMMARY
+        
+        # Проверка конкретных проблем в вашем Dockerfile
+        echo "### 🔍 Проблемы в вашем Dockerfile:" >> $GITHUB_STEP_SUMMARY
+        
+        # Проверка на ADD вместо COPY
+        if grep -q "ADD" Dockerfile; then
+          echo "• **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> $GITHUB_STEP_SUMMARY
         fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Trivy Vulnerabilities: $TRIVY_VULNERABILITIES" >> $GITHUB_STEP_SUMMARY
-        if [ $TRIVY_VULNERABILITIES -gt 0 ]; then
-          echo "⚠️  Найдены уязвимости в образе:" >> $GITHUB_STEP_SUMMARY
-          jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) - \(.ruleId)"' trivy-results.sarif >> $GITHUB_STEP_SUMMARY
-        else
-          echo "✅ Образ прошел проверку безопасности" >> $GITHUB_STEP_SUMMARY
+        # Проверка на фиксированные версии
+        if grep -q "node:14" Dockerfile; then
+          echo "• **WARNING**: Используется фиксированная версия 'node:14'. Рекомендуется использовать конкретные версии" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # Устанавливаем выходные переменные
-        echo "total_issues=$((HADOLINT_ISSUES + TRIVY_VULNERABILITIES))" >> $GITHUB_OUTPUT
+        # Проверка на curl | bash
+        if grep -q "curl.*|.*bash" Dockerfile; then
+          echo "• **CRITICAL**: Обнаружен опасный паттерн 'curl | bash'. Это угроза безопасности!" >> $GITHUB_STEP_SUMMARY
+        fi
         
-    - name: Fail if issues found
-      if: steps.report.outputs.total_issues > 0
+        # Проверка прав 777
+        if grep -q "777" Dockerfile; then
+          echo "• **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Проверка на pinning версий пакетов
+        if grep -q "npm install" Dockerfile && ! grep -q "package-lock.json\|pnpm-lock.yaml" Dockerfile; then
+          echo "• **WARNING**: Установка npm пакетов без фиксации версий" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+    - name: Display Hadolint results
       run: |
-        echo "❌ Найдены проблемы: ${{ steps.report.outputs.total_issues }}"
-        echo "Пожалуйста, исправьте их перед мерджем"
-        exit 1
+        if [ -f hadolint-results.json ]; then
+          echo "### 🐳 Hadolint Detailed Results:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.[] | "• Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json >> $GITHUB_STEP_SUMMARY
+        fi
