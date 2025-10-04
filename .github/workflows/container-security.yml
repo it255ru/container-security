@@ -20,7 +20,17 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
-          format: tty
+          format: json
+
+      # --- 1a. Format Hadolint output for students ---
+      - name: Hadolint Summary
+        run: |
+          echo "🔹 Hadolint summary:"
+          if [ -f Dockerfile ]; then
+            hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' || echo "✅ No issues found"
+          else
+            echo "⚠️ Dockerfile not found"
+          fi
 
       # --- 2. Build Docker image ---
       - name: Build Docker image
@@ -35,11 +45,11 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
-      # --- 4. Summary ---
+      # --- 4. Final Summary ---
       - name: Summary
         run: |
           echo "-----------------------------"
           echo "Dockerfile Audit Completed"
-          echo "Check Hadolint output above."
-          echo "Check Trivy scan output above."
+          echo "Check Hadolint summary above for Dockerfile issues."
+          echo "Check Trivy output above for vulnerabilities."
           echo "-----------------------------"
