@@ -16,23 +16,39 @@ jobs:
       security-events: write
 
     steps:
+      # --- 0. Checkout ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --- 1. Setup Docker ---
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         run: docker build -t myapp:ci .
 
-      # --- 1. Проверка Dockerfile (lint) ---
+      # --- 2. Проверка Dockerfile (lint) ---
       - name: Dockerfile Lint (Hadolint)
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
           format: tty
 
-      # --- 2. Сканирование уязвимостей ---
+      # --- 2a. Обновление checklist с предупреждениями Hadolint ---
+      - name: Update checklist with Hadolint warnings
+        run: |
+          # Создаём файл с выводом Hadolint
+          hadolint Dockerfile > hadolint-output.txt || true
+
+          # Пример обработки DL3007 (latest tag)
+          if grep -q "DL3007" hadolint-output.txt; then
+            if ! grep -q "DL3007" checklist.csv; then
+              echo "☐ DL3007: Pin Docker base image to a specific version" >> checklist.csv
+              echo "DL3007 warning added to checklist.csv"
+            fi
+          fi
+
+      # --- 3. Сканирование уязвимостей ---
       - name: Vulnerability Scan (Trivy)
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -49,7 +65,7 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-      # --- 3. Анализ зависимостей (SCA) ---
+      # --- 4. Анализ зависимостей (SCA) ---
       - name: Software Composition Analysis
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
@@ -57,14 +73,14 @@ jobs:
           format: json
         continue-on-error: true
 
-      # --- 4. Генерация SBOM (Syft) ---
+      # --- 5. Генерация SBOM (Syft) ---
       - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
           image: myapp:ci
           output-file: sbom.json
 
-      # --- 5. Проверка чеклиста (checklist.csv) ---
+      # --- 6. Проверка чеклиста (checklist.csv) ---
       - name: Validate checklist status
         run: |
           echo "Checking checklist..."
@@ -76,7 +92,7 @@ jobs:
             echo "✅ All checklist items completed."
           fi
 
-      # --- 6. Финальный отчёт ---
+      # --- 7. Финальный отчёт ---
       - name: Summary
         run: |
           echo "✅ Container Security Audit completed successfully."
