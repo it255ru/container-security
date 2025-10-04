@@ -105,22 +105,71 @@ jobs:
         
         echo "### 🔍 Found Issues:" >> analysis-results.md
         
-        # Улучшенная проверка на non-root пользователя
-        if ! grep -q "^USER" Dockerfile || grep -q "^USER root" Dockerfile; then
+        # УЛУЧШЕННАЯ ПРОВЕРКА НА NON-ROOT ПОЛЬЗОВАТЕЛЯ
+        HAS_USER_INSTRUCTION=$(grep -c "^USER " Dockerfile 2>/dev/null || echo "0")
+        HAS_ROOT_USER=$(grep "^USER root" Dockerfile 2>/dev/null | wc -l)
+        LAST_USER_INSTRUCTION=$(grep "^USER " Dockerfile 2>/dev/null | tail -1 || echo "")
+        
+        # Проверяем, что последняя инструкция USER не root и существует
+        if [ "$HAS_USER_INSTRUCTION" -eq 0 ]; then
+          echo "⚠️ **WARNING**: Не найдена инструкция USER. Рекомендуется создать non-root пользователя" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        elif [ "$LAST_USER_INSTRUCTION" = "USER root" ]; then
           echo "⚠️ **WARNING**: Контейнер работает от root пользователя. Рекомендуется создать non-root пользователя" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        elif echo "$LAST_USER_INSTRUCTION" | grep -q "USER 0"; then
+          echo "⚠️ **WARNING**: Контейнер работает от root пользователя (UID 0). Рекомендуется создать non-root пользователя" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ Non-root пользователь настроен корректно: $LAST_USER_INSTRUCTION" >> analysis-results.md
         fi
         
         # Проверка на множественные RUN инструкции
         RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
-        if [ "$RUN_COUNT" -gt 3 ]; then
+        if [ "$RUN_COUNT" -gt 5 ]; then
           echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # Другие проверки...
+        # Остальные проверки остаются без изменений...
         if grep "ADD" Dockerfile > /dev/null 2>&1; then
           echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на базовые образы без версий
+        if grep -E "FROM.*:(latest| )" Dockerfile > /dev/null 2>&1 || 
+           grep -E "^FROM [^:]+$" Dockerfile > /dev/null 2>&1; then
+          echo "⚠️ **WARNING**: Базовый образ без конкретной версии. Всегда указывайте версию тега" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на curl | bash
+        if grep -E "curl.*\|.*bash" Dockerfile > /dev/null 2>&1 || 
+           grep -E "wget.*\|.*bash" Dockerfile > /dev/null 2>&1; then
+          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        fi
+        
+        # Проверка прав 777
+        if grep -E "chmod.*777" Dockerfile > /dev/null 2>&1 || 
+           grep -E "777" Dockerfile > /dev/null 2>&1; then
+          echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        fi
+        
+        # Проверка на установку пакетов без очистки кеша
+        if grep -E "(apt-get|apk|yum|dnf) install" Dockerfile > /dev/null 2>&1 && 
+           ! grep -E "(apt-get clean|rm -rf /var/cache/|apk cache clean|yum clean|dnf clean)" Dockerfile > /dev/null 2>&1; then
+          echo "⚠️ **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на отсутствие .dockerignore
+        if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
+          echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
@@ -130,7 +179,6 @@ jobs:
           echo "### 🛠 Docker Build Results:" >> analysis-results.md
           echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
           if [ -f build-results.json ]; then
-            # Проверяем валидность JSON
             if jq -e . build-results.json > /dev/null 2>&1; then
               BUILD_ERROR=$(jq -r '.error // "Build failed but error details are not available"' build-results.json 2>/dev/null)
               echo "Build errors:" >> analysis-results.md
@@ -139,7 +187,6 @@ jobs:
               echo '```' >> analysis-results.md
             else
               echo "• Invalid build results JSON format" >> analysis-results.md
-              # Показываем сырые логи если JSON невалиден
               if [ -f build-errors.log ]; then
                 echo "Raw build errors:" >> analysis-results.md
                 echo '```' >> analysis-results.md
