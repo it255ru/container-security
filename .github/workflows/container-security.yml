@@ -54,6 +54,15 @@ jobs:
           else
             echo "No Hadolint warnings found."
           fi
+          
+      - name: Update checklist with Trivy vulnerabilities
+        run: |
+          # Конвертируем SARIF в читаемый текст
+          jq -r '.runs[].results[] | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
+            if ! grep -Fq "$line" checklist.csv; then
+              echo "$line" >> checklist.csv
+            fi
+          done
 
       # --- 3. Сканирование уязвимостей ---
       - name: Vulnerability Scan (Trivy)
