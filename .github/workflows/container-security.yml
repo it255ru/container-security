@@ -72,3 +72,14 @@ jobs:
           echo "[V] Container security CI/CD checklist complete."
           echo "Check artifacts and logs for details."
 
+      - name: Validate checklist status
+        run: |
+          echo "Checking checklist..."
+          missing=$(grep "☐" checklist.csv || true)
+          if [ -n "$missing" ]; then
+            echo "[X] There are unchecked security tasks:"
+            echo "$missing"
+            exit 1
+          else
+            echo "[V] All checklist items completed."
+          fi
