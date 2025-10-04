@@ -19,6 +19,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
     - name: Run Hadolint
       uses: hadolint/hadolint-action@v3.1.0
       with:
@@ -27,8 +30,28 @@ jobs:
         output-file: hadolint-results.json
       continue-on-error: true
       
+    - name: Try to build Docker image
+      id: build
+      continue-on-error: true
+      run: |
+        echo "🔄 Attempting to build Docker image..."
+        if docker build -t test-image . 2> build-errors.log 1> build-output.log; then
+          echo "✅ Docker build successful"
+          echo "build_success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Docker build failed"
+          echo "build_success=false" >> $GITHUB_OUTPUT
+          # Сохраняем ошибки в удобочитаемом формате
+          echo "### Build Errors:" > build-results.md
+          echo '```' >> build-results.md
+          cat build-errors.log >> build-results.md
+          echo '```' >> build-results.md
+        fi
+      
     - name: Custom Dockerfile analysis
       id: analysis
+      env:
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
       run: |
         # Отключаем немедленный выход при ошибках для этого шага
         set +e
@@ -102,6 +125,24 @@ jobs:
         if [ ! -f ".dockerignore" ]; then
           echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка результатов сборки
+        if [ "$BUILD_SUCCESS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
+          if [ -f build-results.md ]; then
+            cat build-results.md >> analysis-results.md
+          else
+            echo "Build errors were captured but details are not available." >> analysis-results.md
+          fi
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        else
+          echo "" >> analysis-results.md
+          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "✅ Docker image built successfully" >> analysis-results.md
         fi
         
         # Анализ Hadolint результатов
