@@ -35,16 +35,25 @@ jobs:
       continue-on-error: true
       run: |
         echo "🔄 Attempting to build Docker image..."
-        if docker build -t test-image . 2> build-errors.log 1> build-output.log; then
+        set +e
+        docker build -t test-image . > build-output.log 2> build-errors.log
+        BUILD_EXIT_CODE=$?
+        set -e
+        
+        # Читаем логи и экранируем для JSON
+        BUILD_OUTPUT=$(cat build-output.log | sed 's/"/\\"/g' | tr -d '\000-\031')
+        BUILD_ERRORS=$(cat build-errors.log | sed 's/"/\\"/g' | tr -d '\000-\031')
+        
+        if [ $BUILD_EXIT_CODE -eq 0 ]; then
           echo "✅ Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
-          # Сохраняем успешный вывод в JSON
-          echo '{"success": true, "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
+          # Создаем валидный JSON
+          echo "{\"success\": true, \"output\": \"$BUILD_OUTPUT\"}" > build-results.json
         else
           echo "❌ Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          # Сохраняем ошибки в JSON
-          echo '{"success": false, "error": "'$(cat build-errors.log | jq -R -s -c .)'", "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
+          # Создаем валидный JSON с ошибками
+          echo "{\"success\": false, \"error\": \"$BUILD_ERRORS\", \"output\": \"$BUILD_OUTPUT\"}" > build-results.json
         fi
       
     - name: Check for .dockerignore
@@ -130,9 +139,10 @@ jobs:
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # 6. Проверка на работу от root пользователя (универсальная)
-        if ! grep -E "USER.*(?!root)" Dockerfile > /dev/null 2>&1 && 
-           grep -E "RUN" Dockerfile > /dev/null 2>&1; then
+        # 6. Улучшенная проверка на работу от root пользователя
+        if ! grep -E "^USER" Dockerfile > /dev/null 2>&1 || 
+           grep -E "^USER root" Dockerfile > /dev/null 2>&1 || 
+           (grep -E "^USER" Dockerfile > /dev/null 2>&1 && ! grep -E "^USER (?!root)" Dockerfile > /dev/null 2>&1); then
           echo "⚠️ **WARNING**: Контейнер работает от root пользователя. Рекомендуется создать non-root пользователя" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
@@ -156,11 +166,16 @@ jobs:
           echo "### 🛠 Docker Build Results:" >> analysis-results.md
           echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
           if [ -f build-results.json ]; then
-            BUILD_ERROR=$(jq -r '.error' build-results.json 2>/dev/null | jq -r . 2>/dev/null || echo "Build errors were captured but details are not available.")
-            echo "Build errors:" >> analysis-results.md
-            echo '```' >> analysis-results.md
-            echo "$BUILD_ERROR" >> analysis-results.md
-            echo '```' >> analysis-results.md
+            # Безопасное чтение JSON
+            if jq -e . build-results.json > /dev/null 2>&1; then
+              BUILD_ERROR=$(jq -r '.error // "Build errors were captured but details are not available."' build-results.json 2>/dev/null)
+              echo "Build errors:" >> analysis-results.md
+              echo '```' >> analysis-results.md
+              echo "$BUILD_ERROR" >> analysis-results.md
+              echo '```' >> analysis-results.md
+            else
+              echo "• Invalid build results JSON format" >> analysis-results.md
+            fi
           fi
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
