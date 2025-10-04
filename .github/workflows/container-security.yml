@@ -57,12 +57,17 @@ jobs:
           
       - name: Update checklist with Trivy vulnerabilities
         run: |
-          # Конвертируем SARIF в читаемый текст
-          jq -r '.runs[].results[] | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
-            if ! grep -Fq "$line" checklist.csv; then
-              echo "$line" >> checklist.csv
-            fi
-          done
+          if [ -f trivy-results.sarif ]; then
+            echo "Processing Trivy vulnerabilities into checklist.csv..."
+            # Парсим SARIF и добавляем в checklist
+            jq -r '.runs[].results[] | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
+              if ! grep -Fq "$line" checklist.csv; then
+                echo "$line" >> checklist.csv
+              fi
+            done
+          else
+            echo "Trivy SARIF report not found"
+          fi
 
       # --- 3. Сканирование уязвимостей ---
       - name: Vulnerability Scan (Trivy)
