@@ -1,30 +1,13 @@
-# "ported" by Adam Miller <maxamillion@fedoraproject.org> from
-#   https://github.com/fedora-cloud/Fedora-Dockerfiles
-#
-# Originally written for Fedora-Dockerfiles by
-#   Dusty Mabe <dustymabe@gmail.com>
+FROM node:20-alpine as build
 
-FROM centos:centos7
-MAINTAINER The CentOS Project <cloud-ops@centos.org>
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
 
-# Perform updates
-RUN yum -y update; yum clean all
-
-# Install EPEL for owncloud packages
-RUN yum -y install epel-release; yum clean all
-
-# Install owncloud owncloud-httpd owncloud-sqlite rpms
-RUN yum install -y owncloud{,-httpd,-sqlite}; yum clean all
-
-# Install SSL module and force SSL to be used by owncloud
-RUN yum install -y mod_ssl; yum clean all
-RUN sed -i 's/"forcessl" => false,/"forcessl" => true,/' /etc/owncloud/config.php
-
-# Allow connections from everywhere
-RUN sed -i 's/Require local/Require all granted/' /etc/httpd/conf.d/owncloud.conf
-RUN sed -i "s/'trusted_domains'/#'trusted_domains'/" /etc/owncloud/config.php
-
-# Expose port 443 and set httpd as our entrypoint
-EXPOSE 443
-ENTRYPOINT ["/usr/sbin/httpd"]
-CMD ["-D", "FOREGROUND"]
+FROM nginx:stable-alpine
+COPY --from=build /app/build /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/nginx.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
