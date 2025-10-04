@@ -11,14 +11,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # --- 0. Checkout repository ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- Hadolint ---
+      # --- 1. Hadolint Lint ---
       - name: Hadolint Lint
         run: |
           echo "🔹 Checking Dockerfile with Hadolint..."
-          hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' > hadolint-report.txt
+          # Выводим предупреждения в коротком формате
+          hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' > hadolint-report.txt || true
           if [ -s hadolint-report.txt ]; then
             echo "❌ Hadolint found issues:"
             cat hadolint-report.txt
@@ -26,29 +28,25 @@ jobs:
             echo "✅ No Hadolint issues found."
           fi
 
-      # --- Build Docker image for Trivy ---
+      # --- 2. Build Docker image ---
       - name: Build Docker image
         run: docker build -t student-app:ci .
 
-      # --- Trivy scan ---
+      # --- 3. Trivy Vulnerability Scan ---
       - name: Trivy Vulnerability Scan
-        run: |
-          echo "🔹 Scanning Docker image with Trivy..."
-          trivy image --ignore-unfixed --severity CRITICAL,HIGH --format table student-app:ci > trivy-report.txt || true
-          if [ -s trivy-report.txt ]; then
-            echo "❌ Trivy found vulnerabilities:"
-            cat trivy-report.txt
-          else
-            echo "✅ No critical/high vulnerabilities found."
-          fi
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: student-app:ci
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
 
-      # --- Summary ---
+      # --- 4. Summary ---
       - name: Summary
         run: |
           echo "-----------------------------"
           echo "Dockerfile Audit Completed"
           echo "Hadolint issues:"
           [ -f hadolint-report.txt ] && cat hadolint-report.txt || echo "None"
-          echo "Trivy vulnerabilities:"
-          [ -f trivy-report.txt ] && cat trivy-report.txt || echo "None"
+          echo "Trivy scan output above."
           echo "-----------------------------"
