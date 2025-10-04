@@ -131,11 +131,87 @@ jobs:
         fi
         
         # 6. Проверка на работу от root пользователя (универсальная)
-        if ! grep -E "USER.*(?!root)" Dockerfile > /dev/null 2>&1 && 
-           grep -E "RUN" Dockerfile > /dev/null 2>&1; then
-          echo "⚠️ **WARNING**: Контейнер работает от root пользователя. Рекомендуется создать non-root пользователя" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ
+        echo "### 👤 Non-Root User Analysis:" >> analysis-results.md
+        
+        # Получаем последнюю инструкцию USER (если есть)
+        LAST_USER_INSTRUCTION=$(grep "^USER " Dockerfile | tail -1 2>/dev/null || echo "")
+        
+        # Определяем базовый образ
+        BASE_IMAGE=$(grep "^FROM " Dockerfile | head -1 | awk '{print $2}' 2>/dev/null || echo "")
+        
+        # Флаг для определения наличия non-root пользователя
+        HAS_NON_ROOT_USER=false
+        REASON=""
+        
+        # Логика проверки в порядке приоритета:
+        if [ -n "$LAST_USER_INSTRUCTION" ]; then
+            # Случай 1: Есть явная инструкция USER и она не root/0
+            if [[ "$LAST_USER_INSTRUCTION" != "USER root" && "$LAST_USER_INSTRUCTION" != "USER 0" ]]; then
+                HAS_NON_ROOT_USER=true
+                REASON="Явно указан non-root пользователь: $LAST_USER_INSTRUCTION"
+            else
+                REASON="Явно указан root пользователь: $LAST_USER_INSTRUCTION"
+            fi
+        else
+            # Случай 2: Нет инструкции USER - проверяем базовые образы
+            case "$BASE_IMAGE" in
+                *nginx*)
+                    HAS_NON_ROOT_USER=true
+                    REASON="Образ nginx использует встроенного пользователя 'nginx'"
+                    ;;
+                *node*)
+                    HAS_NON_ROOT_USER=true  
+                    REASON="Образ node использует встроенного пользователя 'node'"
+                    ;;
+                *postgres*)
+                    HAS_NON_ROOT_USER=true
+                    REASON="Образ postgres использует встроенного пользователя 'postgres'"
+                    ;;
+                *redis*)
+                    HAS_NON_ROOT_USER=true
+                    REASON="Образ redis использует встроенного пользователя 'redis'"
+                    ;;
+                *mongo*)
+                    HAS_NON_ROOT_USER=true
+                    REASON="Образ mongo использует встроенного пользователя 'mongodb'"
+                    ;;
+                *elasticsearch*)
+                    HAS_NON_ROOT_USER=true
+                    REASON="Образ elasticsearch использует встроенного пользователя 'elasticsearch'"
+                    ;;
+                *)
+                    # Случай 3: Неизвестный образ - проверяем создание пользователей в RUN
+                    USER_CREATION_FOUND=$(grep -E "adduser|useradd|addgroup|groupadd" Dockerfile 2>/dev/null | head -1 || echo "")
+                    if [ -n "$USER_CREATION_FOUND" ]; then
+                        REASON="Пользователь создается, но не используется в USER: $USER_CREATION_FOUND"
+                    else
+                        REASON="Не обнаружено создание non-root пользователя"
+                    fi
+                    ;;
+            esac
         fi
+        
+        # Вывод результата
+        if [ "$HAS_NON_ROOT_USER" = true ]; then
+            echo "✅ **PASS**: $REASON" >> analysis-results.md
+            # Рекомендуем явно указать USER для ясности
+            if [ -z "$LAST_USER_INSTRUCTION" ]; then
+                case "$BASE_IMAGE" in
+                    *nginx*) echo "   Рекомендуется явно указать: USER nginx" >> analysis-results.md ;;
+                    *node*) echo "   Рекомендуется явно указать: USER node" >> analysis-results.md ;;
+                    *postgres*) echo "   Рекомендуется явно указать: USER postgres" >> analysis-results.md ;;
+                esac
+            fi
+        else
+            echo "⚠️ **WARNING**: $REASON" >> analysis-results.md
+            echo "   Рекомендуется:" >> analysis-results.md
+            echo "   - Создать non-root пользователя (adduser/useradd)" >> analysis-results.md
+            echo "   - Указать USER инструкцию в конце Dockerfile" >> analysis-results.md
+            ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        echo "" >> analysis-results.md
         
         # 7. Проверка на множественные RUN инструкции (универсальная)
         RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
