@@ -16,17 +16,11 @@ jobs:
         uses: actions/checkout@v4
 
       # --- 1. Hadolint Lint ---
-      - name: Hadolint Lint
-        run: |
-          echo "🔹 Checking Dockerfile with Hadolint..."
-          # Выводим предупреждения в коротком формате
-          hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' > hadolint-report.txt || true
-          if [ -s hadolint-report.txt ]; then
-            echo "❌ Hadolint found issues:"
-            cat hadolint-report.txt
-          else
-            echo "✅ No Hadolint issues found."
-          fi
+      - name: Dockerfile Lint (Hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: tty
 
       # --- 2. Build Docker image ---
       - name: Build Docker image
@@ -46,7 +40,6 @@ jobs:
         run: |
           echo "-----------------------------"
           echo "Dockerfile Audit Completed"
-          echo "Hadolint issues:"
-          [ -f hadolint-report.txt ] && cat hadolint-report.txt || echo "None"
-          echo "Trivy scan output above."
+          echo "Check Hadolint output above."
+          echo "Check Trivy scan output above."
           echo "-----------------------------"
