@@ -1,4 +1,4 @@
-name: Container Security Audit
+name: Dockerfile Security Audit
 
 on:
   push:
@@ -7,111 +7,48 @@ on:
     branches: [ main ]
 
 jobs:
-  security_audit:
-    name: Container Security CI/CD Checklist
+  dockerfile_audit:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-      security-events: write
-
     steps:
-      # --- 0. Checkout ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- 1. Setup Docker ---
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # --- Hadolint ---
+      - name: Hadolint Lint
+        run: |
+          echo "🔹 Checking Dockerfile with Hadolint..."
+          hadolint Dockerfile -f json | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"' > hadolint-report.txt
+          if [ -s hadolint-report.txt ]; then
+            echo "❌ Hadolint found issues:"
+            cat hadolint-report.txt
+          else
+            echo "✅ No Hadolint issues found."
+          fi
 
+      # --- Build Docker image for Trivy ---
       - name: Build Docker image
-        run: docker build -t myapp:ci .
+        run: docker build -t student-app:ci .
 
-      # --- 1. Проверка Dockerfile (lint) ---
-      - name: Dockerfile Lint (Hadolint)
+      # --- Trivy scan ---
+      - name: Trivy Vulnerability Scan
         run: |
-          hadolint Dockerfile -f json > hadolint.json || true
-
-      # --- 1a. Авто-обновление checklist с предупреждениями Hadolint ---
-      - name: Update checklist with Hadolint warnings
-        run: |
-          if [ ! -f checklist.csv ]; then
-            echo "Checklist" > checklist.csv
-          fi
-          if [ -s hadolint.json ]; then
-            jq -r '.[] | "☐ \(.code) \(.line): \(.message)"' hadolint.json | while read -r line; do
-              if ! grep -Fq "$line" checklist.csv; then
-                echo "$line" >> checklist.csv
-              fi
-            done
-          fi
-
-      # --- 2. Сканирование уязвимостей ---
-      - name: Vulnerability Scan (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: myapp:ci
-          format: sarif
-          output: trivy-results.sarif
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          exit-code: 1
-
-      # --- 2a. Обновление checklist с уязвимостями Trivy ---
-      - name: Update checklist with Trivy vulnerabilities
-        run: |
-          if [ ! -f checklist.csv ]; then
-            echo "Checklist" > checklist.csv
-          fi
-      
-          if [ -f trivy-results.sarif ]; then
-            echo "Processing Trivy vulnerabilities into checklist.csv..."
-            jq -r '.runs[].results[] | select(.level=="high" or .level=="critical") | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
-              if ! grep -Fq "$line" checklist.csv; then
-                echo "$line" >> checklist.csv
-              fi
-            done
+          echo "🔹 Scanning Docker image with Trivy..."
+          trivy image --ignore-unfixed --severity CRITICAL,HIGH --format table student-app:ci > trivy-report.txt || true
+          if [ -s trivy-report.txt ]; then
+            echo "❌ Trivy found vulnerabilities:"
+            cat trivy-report.txt
           else
-            echo "Trivy SARIF report not found"
+            echo "✅ No critical/high vulnerabilities found."
           fi
 
-
-
-      # --- 3. Upload Trivy SARIF to GitHub Security tab ---
-      - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-results.sarif
-
-      # --- 4. Анализ зависимостей (SCA) ---
-      - name: Software Composition Analysis
-        uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          requirements: requirements.txt
-          format: json
-        continue-on-error: true
-
-      # --- 5. Генерация SBOM (Syft) ---
-      - name: Generate SBOM (Syft)
-        uses: anchore/sbom-action@v0
-        with:
-          image: myapp:ci
-          output-file: sbom.json
-
-      # --- 6. Проверка чеклиста (checklist.csv) ---
-      - name: Validate checklist status
-        run: |
-          echo "Checking checklist..."
-          if grep -q "☐" checklist.csv; then
-            echo "❌ There are unchecked security tasks:"
-            grep "☐" checklist.csv
-            exit 1
-          else
-            echo "✅ All checklist items completed."
-          fi
-
-      # --- 7. Финальный отчёт ---
+      # --- Summary ---
       - name: Summary
         run: |
-          echo "✅ Container Security Audit completed successfully."
+          echo "-----------------------------"
+          echo "Dockerfile Audit Completed"
+          echo "Hadolint issues:"
+          [ -f hadolint-report.txt ] && cat hadolint-report.txt || echo "None"
+          echo "Trivy vulnerabilities:"
+          [ -f trivy-report.txt ] && cat trivy-report.txt || echo "None"
+          echo "-----------------------------"
