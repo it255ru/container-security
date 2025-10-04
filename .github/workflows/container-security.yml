@@ -144,12 +144,15 @@ jobs:
     - name: Create or Update Issue
       uses: actions/github-script@v6
       if: steps.analysis.outputs.issue_count > 0
+      env:
+        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
+        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
       with:
         script: |
           const fs = require('fs');
           const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = steps.analysis.outputs.issue_count;
-          const criticalCount = steps.analysis.outputs.critical_count;
+          const issueCount = process.env.ISSUE_COUNT;
+          const criticalCount = process.env.CRITICAL_COUNT;
           
           const title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
           
@@ -240,12 +243,15 @@ jobs:
     - name: Post PR comment
       uses: actions/github-script@v6
       if: github.event_name == 'pull_request' && steps.analysis.outputs.issue_count > 0
+      env:
+        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
+        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
       with:
         script: |
           const fs = require('fs');
           const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = steps.analysis.outputs.issue_count;
-          const criticalCount = steps.analysis.outputs.critical_count;
+          const issueCount = process.env.ISSUE_COUNT;
+          const criticalCount = process.env.CRITICAL_COUNT;
           
           const commentBody = `## 🔍 Dockerfile Security Scan
           
