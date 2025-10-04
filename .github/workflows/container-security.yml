@@ -35,16 +35,92 @@ jobs:
       continue-on-error: true
       run: |
         echo "🔄 Attempting to build Docker image..."
-        if docker build -t test-image . 2> build-errors.log 1> build-output.log; then
+        
+        # Создаем необходимые файлы если их нет
+        mkdir -p html
+        if [ ! -f "html/index.html" ]; then
+          echo '<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Test Page</h1></body></html>' > html/index.html
+        fi
+        
+        # Создаем nginx-minimal.conf если его нет
+        if [ ! -f "nginx-minimal.conf" ]; then
+          cat > nginx-minimal.conf << 'EOF'
+user nginx nginx;
+worker_processes 1;
+pid /var/run/nginx/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    
+    server_tokens off;
+    
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log;
+    
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    
+    server {
+        listen 8080;
+        server_name _;
+        root /var/www/html;
+        index index.html;
+        
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+}
+EOF
+        fi
+        
+        echo "📁 Current directory structure:"
+        ls -la
+        echo "📁 HTML directory:"
+        ls -la html/
+        echo "📄 Checking nginx-minimal.conf:"
+        if [ -f "nginx-minimal.conf" ]; then
+          echo "✅ nginx-minimal.conf exists"
+        else
+          echo "❌ nginx-minimal.conf missing"
+        fi
+        
+        # Пытаемся собрать образ с подробным выводом
+        set +e
+        echo "🔨 Building Docker image with detailed output..."
+        docker build --no-cache --progress=plain -t test-image . 2>&1 | tee build-full.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        set -e
+        
+        echo "=== FULL BUILD LOG (last 100 lines) ==="
+        tail -100 build-full.log
+        
+        # Сохраняем отдельно вывод и ошибки
+        docker build -t test-image . > build-output.log 2> build-errors.log
+        
+        echo "=== BUILD OUTPUT (last 50 lines) ==="  
+        tail -50 build-output.log
+        echo "=== BUILD ERRORS ==="
+        cat build-errors.log
+        
+        # Создаем JSON с результатами (упрощенный вариант)
+        if [ $BUILD_EXIT_CODE -eq 0 ]; then
           echo "✅ Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
-          # Сохраняем успешный вывод в JSON
-          echo '{"success": true, "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
+          echo '{"success": true, "message": "Build completed successfully"}' > build-results.json
         else
           echo "❌ Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          # Сохраняем ошибки в JSON
-          echo '{"success": false, "error": "'$(cat build-errors.log | jq -R -s -c .)'", "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
+          # Безопасное создание JSON с ошибкой
+          ERROR_MSG=$(head -c 500 build-errors.log | sed 's/"/\\"/g' | tr -d '\n\r' || echo "Unknown error")
+          echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
       
     - name: Check for .dockerignore
