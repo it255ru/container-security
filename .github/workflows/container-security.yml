@@ -34,18 +34,25 @@ jobs:
           dockerfile: Dockerfile
           format: tty
 
-      # --- 2a. Обновление checklist с предупреждениями Hadolint ---
+      # --- 2a. Авто-обновление checklist с любыми предупреждениями Hadolint ---
       - name: Update checklist with Hadolint warnings
         run: |
-          # Создаём файл с выводом Hadolint
+          # Получаем все предупреждения Hadolint
           hadolint Dockerfile > hadolint-output.txt || true
 
-          # Пример обработки DL3007 (latest tag)
-          if grep -q "DL3007" hadolint-output.txt; then
-            if ! grep -q "DL3007" checklist.csv; then
-              echo "☐ DL3007: Pin Docker base image to a specific version" >> checklist.csv
-              echo "DL3007 warning added to checklist.csv"
-            fi
+          # Проверяем, есть ли предупреждения
+          if [ -s hadolint-output.txt ]; then
+            echo "Processing Hadolint warnings into checklist.csv..."
+            while read -r line; do
+              # Извлекаем код предупреждения (например DL3007)
+              code=$(echo "$line" | awk '{print $1}')
+              # Проверяем, что такого пункта ещё нет в checklist.csv
+              if ! grep -q "$code" checklist.csv; then
+                echo "☐ $line" >> checklist.csv
+              fi
+            done < hadolint-output.txt
+          else
+            echo "No Hadolint warnings found."
           fi
 
       # --- 3. Сканирование уязвимостей ---
