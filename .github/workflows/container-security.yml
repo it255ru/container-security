@@ -48,10 +48,34 @@ jobs:
           echo '```' >> build-results.md
         fi
       
+    - name: Check for .dockerignore
+      id: dockerignore_check
+      run: |
+        if [ -f ".dockerignore" ]; then
+          echo "✅ .dockerignore file found"
+          echo "dockerignore_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️ No .dockerignore file found"
+          echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: Run Trivy vulnerability scan
+      id: trivy_scan
+      if: steps.build.outputs.build_success == 'true' && steps.dockerignore_check.outputs.dockerignore_exists == 'true'
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: test-image
+        format: sarif
+        output: trivy-results.sarif
+        severity: HIGH,CRITICAL
+        exit-code: 0
+      continue-on-error: true
+      
     - name: Custom Dockerfile analysis
       id: analysis
       env:
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        DOCKERIGNORE_EXISTS: ${{ steps.dockerignore_check.outputs.dockerignore_exists }}
       run: |
         # Отключаем немедленный выход при ошибках для этого шага
         set +e
@@ -122,7 +146,7 @@ jobs:
         fi
         
         # 8. Проверка на отсутствие .dockerignore (универсальная)
-        if [ ! -f ".dockerignore" ]; then
+        if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
           echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
@@ -168,8 +192,38 @@ jobs:
           echo "• Файл результатов не найден" >> analysis-results.md
         fi
         
+        # Анализ результатов Trivy
+        TRIVY_COUNT=0
+        if [ -f trivy-results.sarif ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          
+          if jq -e . trivy-results.sarif > /dev/null 2>&1; then
+            TRIVY_COUNT=$(jq '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "0")
+            if [ "$TRIVY_COUNT" -gt 0 ]; then
+              echo "⚠️ **SECURITY**: Found $TRIVY_COUNT vulnerabilities in the image" >> analysis-results.md
+              jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (уязвимость: \(.ruleId))"' trivy-results.sarif 2>/dev/null | head -10 >> analysis-results.md
+              if [ "$TRIVY_COUNT" -gt 10 ]; then
+                echo "• ... and $((TRIVY_COUNT - 10)) more vulnerabilities" >> analysis-results.md
+              fi
+            else
+              echo "✅ No vulnerabilities found by Trivy" >> analysis-results.md
+            fi
+          else
+            echo "• Невалидный SARIF файл результатов Trivy" >> analysis-results.md
+          fi
+        elif [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          echo "⏭️ **SKIPPED**: Trivy scan skipped because .dockerignore file is missing" >> analysis-results.md
+        elif [ "$BUILD_SUCCESS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          echo "⏭️ **SKIPPED**: Trivy scan skipped because Docker build failed" >> analysis-results.md
+        fi
+        
         # Суммируем все проблемы
-        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT + TRIVY_COUNT))
         
         echo "" >> analysis-results.md
         echo "---" >> analysis-results.md
