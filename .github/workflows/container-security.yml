@@ -105,54 +105,97 @@ jobs:
         
         echo "### 🔍 Found Issues:" >> analysis-results.md
         
-        # УЛУЧШЕННАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ - РАБОЧАЯ ВЕРСИЯ
-        echo "🔍 Analyzing USER instructions..." >> analysis-results.md
+        # ПРОВЕРКА СОЗДАНИЯ И ИСПОЛЬЗОВАНИЯ NON-ROOT ПОЛЬЗОВАТЕЛЯ
+        echo "### 👤 Non-Root User Analysis:" >> analysis-results.md
         
-        # Получаем все USER инструкции
-        USER_INSTRUCTIONS=$(grep "^USER " Dockerfile 2>/dev/null || true)
-        LAST_USER_INSTRUCTION=$(echo "$USER_INSTRUCTIONS" | tail -1 || echo "")
+        # Поиск создания пользователей в RUN инструкциях
+        USER_CREATION_PATTERNS=(
+          "adduser"
+          "useradd" 
+          "addgroup"
+          "groupadd"
+          "chown.*:"
+          "chmod.*[0-9]{3}.*/home"
+        )
         
-        # Проверяем различные сценарии
-        if [ -z "$USER_INSTRUCTIONS" ]; then
-          # Нет USER инструкции - проверяем базовый образ
-          BASE_IMAGE=$(grep "^FROM " Dockerfile | head -1 | awk '{print $2}')
-          if [[ "$BASE_IMAGE" == *"nginx"* ]] || [[ "$BASE_IMAGE" == *"node"* ]] || [[ "$BASE_IMAGE" == *"postgres"* ]]; then
-            echo "✅ Используется официальный образ с non-root пользователем по умолчанию: $BASE_IMAGE" >> analysis-results.md
-          else
-            echo "⚠️ **WARNING**: Не найдена инструкция USER. Рекомендуется создать non-root пользователя" >> analysis-results.md
-            ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          fi
-        elif [ "$LAST_USER_INSTRUCTION" = "USER root" ] || [ "$LAST_USER_INSTRUCTION" = "USER 0" ]; then
-          echo "⚠️ **WARNING**: Контейнер работает от root пользователя: $LAST_USER_INSTRUCTION" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        else
-          echo "✅ Non-root пользователь настроен корректно: $LAST_USER_INSTRUCTION" >> analysis-results.md
+        USER_CREATED=false
+        USER_CREATION_LINES=""
+        
+        # Проверяем все RUN инструкции на создание пользователей
+        while IFS= read -r line; do
+          for pattern in "${USER_CREATION_PATTERNS[@]}"; do
+            if echo "$line" | grep -E "$pattern" > /dev/null; then
+              USER_CREATED=true
+              USER_CREATION_LINES="$USER_CREATION_LINES- $line"$'\n'
+              break
+            fi
+          done
+        done < <(grep "^RUN " Dockerfile)
+        
+        # Проверяем инструкции USER
+        USER_INSTRUCTIONS=$(grep "^USER " Dockerfile)
+        LAST_USER_INSTRUCTION=$(echo "$USER_INSTRUCTIONS" | tail -1)
+        HAS_EXPLICIT_NON_ROOT_USER=false
+        
+        # Анализируем USER инструкции
+        if [ -n "$USER_INSTRUCTIONS" ]; then
+          while IFS= read -r user_line; do
+            if [[ "$user_line" != "USER root" && "$user_line" != "USER 0" ]]; then
+              HAS_EXPLICIT_NON_ROOT_USER=true
+              NON_ROOT_USER="$user_line"
+            fi
+          done <<< "$USER_INSTRUCTIONS"
         fi
+        
+        # Определяем базовый образ
+        BASE_IMAGE=$(grep "^FROM " Dockerfile | tail -1 | awk '{print $2}')
+        
+        # Логика определения non-root статуса
+        if [ "$HAS_EXPLICIT_NON_ROOT_USER" = true ]; then
+          echo "✅ **PASS**: Явно указан non-root пользователь: $NON_ROOT_USER" >> analysis-results.md
+        elif [ -n "$USER_CREATION_LINES" ]; then
+          echo "⚠️ **WARNING**: Пользователь создается, но не используется в USER инструкции:" >> analysis-results.md
+          echo "$USER_CREATION_LINES" >> analysis-results.md
+          echo "Добавьте инструкцию: USER <username>" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        elif [[ "$BASE_IMAGE" == *"nginx"* ]]; then
+          echo "✅ **PASS**: Образ nginx использует встроенного пользователя 'nginx'" >> analysis-results.md
+          echo "Рекомендуется явно указать: USER nginx" >> analysis-results.md
+        elif [[ "$BASE_IMAGE" == *"node"* ]]; then
+          echo "✅ **PASS**: Образ node использует встроенного пользователя 'node'" >> analysis-results.md  
+          echo "Рекомендуется явно указать: USER node" >> analysis-results.md
+        elif [[ "$BASE_IMAGE" == *"postgres"* ]]; then
+          echo "✅ **PASS**: Образ postgres использует встроенного пользователя 'postgres'" >> analysis-results.md
+          echo "Рекомендуется явно указать: USER postgres" >> analysis-results.md
+        else
+          echo "⚠️ **WARNING**: Не обнаружено создание non-root пользователя" >> analysis-results.md
+          echo "Рекомендуется:" >> analysis-results.md
+          echo "- Создать non-root пользователя (adduser/useradd)" >> analysis-results.md
+          echo "- Указать USER инструкцию в конце Dockerfile" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        echo "" >> analysis-results.md
+        
+        # ОСТАЛЬНЫЕ ПРОВЕРКИ
+        echo "### 🐳 Dockerfile Best Practices:" >> analysis-results.md
         
         # Проверка на множественные RUN инструкции
         RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
         if [ "$RUN_COUNT" -gt 5 ]; then
           echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ RUN инструкции: $RUN_COUNT (в норме)" >> analysis-results.md
         fi
         
         # Проверка на ADD вместо COPY
-        if grep "ADD" Dockerfile > /dev/null 2>&1; then
-          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+        ADD_COUNT=$(grep -c "ADD" Dockerfile 2>/dev/null || echo "0")
+        if [ "$ADD_COUNT" -gt 0 ]; then
+          echo "❌ **WARNING**: Используется ADD ($ADD_COUNT раз) вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # Проверка на множественные RUN инструкции
-        RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
-        if [ "$RUN_COUNT" -gt 5 ]; then
-          echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # Остальные проверки остаются без изменений...
-        if grep "ADD" Dockerfile > /dev/null 2>&1; then
-          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ Используется COPY вместо ADD" >> analysis-results.md
         fi
         
         # Проверка на базовые образы без версий
@@ -160,14 +203,18 @@ jobs:
            grep -E "^FROM [^:]+$" Dockerfile > /dev/null 2>&1; then
           echo "⚠️ **WARNING**: Базовый образ без конкретной версии. Всегда указывайте версию тега" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ Базовый образ с конкретной версией" >> analysis-results.md
         fi
         
         # Проверка на curl | bash
         if grep -E "curl.*\|.*bash" Dockerfile > /dev/null 2>&1 || 
            grep -E "wget.*\|.*bash" Dockerfile > /dev/null 2>&1; then
-          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
+          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl | bash'. Это угроза безопасности!" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        else
+          echo "✅ Нет опасных curl | bash паттернов" >> analysis-results.md
         fi
         
         # Проверка прав 777
@@ -176,6 +223,8 @@ jobs:
           echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        else
+          echo "✅ Нет опасных прав 777" >> analysis-results.md
         fi
         
         # Проверка на установку пакетов без очистки кеша
@@ -183,12 +232,16 @@ jobs:
            ! grep -E "(apt-get clean|rm -rf /var/cache/|apk cache clean|yum clean|dnf clean)" Dockerfile > /dev/null 2>&1; then
           echo "⚠️ **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ Кеш пакетов очищается" >> analysis-results.md
         fi
         
         # Проверка на отсутствие .dockerignore
         if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
           echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        else
+          echo "✅ .dockerignore файл присутствует" >> analysis-results.md
         fi
         
         # Проверка результатов сборки
