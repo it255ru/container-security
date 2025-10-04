@@ -64,13 +64,19 @@ jobs:
           if [ ! -f checklist.csv ]; then
             echo "Checklist" > checklist.csv
           fi
+      
           if [ -f trivy-results.sarif ]; then
+            echo "Processing Trivy vulnerabilities into checklist.csv..."
             jq -r '.runs[].results[] | select(.level=="high" or .level=="critical") | "☐ \(.ruleId) \(.level): \(.message.text)"' trivy-results.sarif | while read -r line; do
               if ! grep -Fq "$line" checklist.csv; then
                 echo "$line" >> checklist.csv
               fi
             done
+          else
+            echo "Trivy SARIF report not found"
           fi
+
+
 
       # --- 3. Upload Trivy SARIF to GitHub Security tab ---
       - name: Upload Trivy results to GitHub Security tab
