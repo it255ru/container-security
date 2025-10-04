@@ -51,7 +51,7 @@ jobs:
 
       # --- 3. Анализ зависимостей (SCA) ---
       - name: Software Composition Analysis
-        uses: pypa/gh-action-pip-audit@v1.2.0
+        uses: pypa/gh-action-pip-audit@v1.1.0
         with:
           inputs: requirements.txt
           format: json
