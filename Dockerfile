@@ -1,43 +1,29 @@
-# Используем конкретную версию базового образа
-FROM node:18.20.4-alpine3.20
+# Используем конкретную версию nginx на Alpine
+FROM nginx:1.24.0-alpine
 
 # Устанавливаем метаданные
 LABEL maintainer="your-email@example.com"
-LABEL description="Production ready application"
+LABEL description="Production nginx server"
 
-# Устанавливаем аргументы сборки
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
-
-# Создаем non-root пользователя и устанавливаем рабочую директорию в одном RUN
+# Создаем non-root пользователя (nginx уже создан в базовом образе, но убедимся)
 RUN addgroup -g 1001 -S appgroup && \
     adduser -S appuser -u 1001 -G appgroup && \
-    mkdir -p /app && \
-    chown -R appuser:appgroup /app
+    chown -R appuser:appgroup /var/cache/nginx && \
+    chown -R appuser:appgroup /var/run && \
+    chmod -R 755 /var/cache/nginx
 
-# Устанавливаем рабочую директорию
-WORKDIR /app
+# Копируем кастомную конфигурацию nginx
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY default.conf /etc/nginx/conf.d/default.conf
 
-# Копируем файлы зависимостей
-COPY --chown=appuser:appgroup package*.json ./
-COPY --chown=appuser:appgroup pnpm-lock.yaml ./
-
-# Устанавливаем зависимости, собираем приложение и очищаем кеш в одном RUN
-RUN npm install -g pnpm@9.0.0 && \
-    pnpm install --frozen-lockfile --prod && \
-    if [ -f "prisma/schema.prisma" ]; then npx prisma generate; fi && \
-    npm run build && \
-    npm cache clean --force && \
-    rm -rf /tmp/* /root/.npm
-
-# Копируем исходный код с правильными правами
-COPY --chown=appuser:appgroup . .
+# Копируем статические файлы
+COPY --chown=appuser:appgroup html /usr/share/nginx/html
 
 # Переключаемся на non-root пользователя
 USER appuser
 
-# Открываем порт
-EXPOSE 3000
+# Открываем порт (nginx будет слушать на 8080 для non-root пользователя)
+EXPOSE 8080
 
-# Запускаем приложение
-CMD ["node", "dist/main.js"]
+# Запускаем nginx
+CMD ["nginx", "-g", "daemon off;"]
