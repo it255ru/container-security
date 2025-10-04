@@ -1,14 +1,37 @@
-# A basic apache server. To use either add or bind mount content under /var/www
-FROM ubuntu:12.04
+FROM alpine:latest
 
-MAINTAINER Kimbro Staken version: 0.1
+RUN set -x \
+ && addgroup -S stunnel \
+ && adduser -S -G stunnel stunnel \
+ && apk add --update --no-cache \
+        ca-certificates \
+        libintl \
+        openssl \
+        stunnel \
+ && grep main /etc/apk/repositories > /etc/apk/main.repo \
+ && apk add --update --no-cache --repositories-file=/etc/apk/main.repo \
+        gettext \
+ && cp -v /usr/bin/envsubst /usr/local/bin/ \
+ && apk del --purge \
+        gettext \
+ && apk --no-network info openssl \
+ && apk --no-network info stunnel
+COPY *.template openssl.cnf /srv/stunnel/
+COPY stunnel.sh /srv/
 
-RUN apt-get update && apt-get install -y apache2 && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN set -x \
+ && chmod +x /srv/stunnel.sh \
+ && mkdir -p /var/run/stunnel /var/log/stunnel \
+ && chown -vR stunnel:stunnel /var/run/stunnel /var/log/stunnel \
+ && mv -v /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.conf.original
 
-ENV APACHE_RUN_USER www-data
-ENV APACHE_RUN_GROUP www-data
-ENV APACHE_LOG_DIR /var/log/apache2
+ENTRYPOINT ["/srv/stunnel.sh"]
+CMD ["stunnel"]
 
-EXPOSE 80
-
-CMD ["/usr/sbin/apache2", "-D", "FOREGROUND"]
+LABEL org.label-schema.name="dweomer/stunnel" \
+      org.label-schema.description="Stunnel on Alpine" \
+      org.label-schema.url="https://github.com/dweomer/dockerfiles-stunnel/" \
+      org.label-schema.usage="https://github.com/dweomer/dockerfiles-stunnel/blob/master/README.md" \
+      org.label-schema.vcs-url="https://github.com/dweomer/dockerfiles-stunnel/" \
+      org.label-schema.vendor="Jacob Blain Christen - mailto:dweomer5@gmail.com, https://github.com/dweomer, https://twitter.com/dweomer" \
+      org.label-schema.schema-version="1.0"
