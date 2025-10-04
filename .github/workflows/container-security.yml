@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   dockerfile-scan:
     runs-on: ubuntu-latest
@@ -14,98 +19,200 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Run Hadolint (Dockerfile best practices)
+    - name: Run Hadolint
       uses: hadolint/hadolint-action@v3.1.0
       with:
         dockerfile: Dockerfile
-        format: sarif
-        output-file: hadolint-results.sarif
+        format: json
+        output-file: hadolint-results.json
       continue-on-error: true
       
-    - name: Run Dockle (Security scanning)
-      uses: aquasecurity/dockle-action@v0.3.4
-      with:
-        image: none
-        files: Dockerfile
-        output: sarif
-        output-file: dockle-results.sarif
-        exit-code: 0
-      continue-on-error: true
-      
-    - name: Run Trivy config scan (Dockerfile vulnerabilities)
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: config
-        scan-ref: .
-        format: sarif
-        output: trivy-config-results.sarif
-        severity: HIGH,CRITICAL
-        exit-code: 0
-      continue-on-error: true
-      
-    - name: Generate compact report
-      id: report
+    - name: Custom Dockerfile analysis
+      id: analysis
       run: |
-        echo "## 🔍 Dockerfile Security Scan Report" > $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📋 Dockerfile Analysis Results" > analysis-results.md
+        echo "" >> analysis-results.md
+        echo "**Scan date:** $(date)" >> analysis-results.md
+        echo "**Commit:** ${{ github.sha }}" >> analysis-results.md
+        echo "**Branch:** ${{ github.ref }}" >> analysis-results.md
+        echo "" >> analysis-results.md
         
-        # Hadolint results
-        if [ -f hadolint-results.sarif ]; then
-          HADOLINT_ISSUES=$(jq '.runs[0].results | length' hadolint-results.sarif)
-          echo "### 🐳 Hadolint Issues: $HADOLINT_ISSUES" >> $GITHUB_STEP_SUMMARY
-          if [ $HADOLINT_ISSUES -gt 0 ]; then
-            jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (правило: \(.ruleId))"' hadolint-results.sarif >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ No Hadolint issues found" >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "### 🐳 Hadolint: No results" >> $GITHUB_STEP_SUMMARY
+        # Проверка конкретных проблем
+        echo "### 🔍 Found Issues:" >> analysis-results.md
+        
+        ISSUE_COUNT=0
+        CRITICAL_COUNT=0
+        
+        # Проверка на ADD вместо COPY
+        if grep -q "ADD" Dockerfile; then
+          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+          ((ISSUE_COUNT++))
         fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # Dockle results
-        if [ -f dockle-results.sarif ]; then
-          DOCKLE_ISSUES=$(jq '.runs[0].results | length' dockle-results.sarif)
-          echo "### 🔒 Dockle Security Issues: $DOCKLE_ISSUES" >> $GITHUB_STEP_SUMMARY
-          if [ $DOCKLE_ISSUES -gt 0 ]; then
-            jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (правило: \(.ruleId))"' dockle-results.sarif >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ No Dockle security issues found" >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "### 🔒 Dockle: No results" >> $GITHUB_STEP_SUMMARY
+        # Проверка на фиксированные версии
+        if grep -q "node:14" Dockerfile; then
+          echo "⚠️ **WARNING**: Используется фиксированная версия 'node:14'. Рекомендуется использовать конкретные версии" >> analysis-results.md
+          ((ISSUE_COUNT++))
         fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # Trivy config results
-        if [ -f trivy-config-results.sarif ]; then
-          TRIVY_ISSUES=$(jq '.runs[0].results | length' trivy-config-results.sarif)
-          echo "### ⚠️ Trivy Config Issues: $TRIVY_ISSUES" >> $GITHUB_STEP_SUMMARY
-          if [ $TRIVY_ISSUES -gt 0 ]; then
-            jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) - \(.ruleId)"' trivy-config-results.sarif >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ No Trivy config issues found" >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "### ⚠️ Trivy Config: No results" >> $GITHUB_STEP_SUMMARY
+        # Проверка на curl | bash
+        if grep -q "curl.*|.*bash" Dockerfile; then
+          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl | bash'. Это угроза безопасности!" >> analysis-results.md
+          ((ISSUE_COUNT++))
+          ((CRITICAL_COUNT++))
         fi
         
-        # Calculate total issues
-        TOTAL_ISSUES=$((HADOLINT_ISSUES + DOCKLE_ISSUES + TRIVY_ISSUES))
-        echo "total_issues=$TOTAL_ISSUES" >> $GITHUB_OUTPUT
+        # Проверка прав 777
+        if grep -q "777" Dockerfile; then
+          echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
+          ((ISSUE_COUNT++))
+          ((CRITICAL_COUNT++))
+        fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "---" >> $GITHUB_STEP_SUMMARY
-        echo "**Summary**: Found $TOTAL_ISSUES total issues" >> $GITHUB_STEP_SUMMARY
+        # Проверка на pinning версий пакетов
+        if grep -q "npm install" Dockerfile && ! grep -q "package-lock.json\|pnpm-lock.yaml" Dockerfile; then
+          echo "⚠️ **WARNING**: Установка npm пакетов без фиксации версий" >> analysis-results.md
+          ((ISSUE_COUNT++))
+        fi
         
+        # Проверка на WORKDIR с абсолютными путями
+        if ! grep -q "WORKDIR /app" Dockerfile; then
+          echo "⚠️ **WARNING**: Рекомендуется использовать абсолютные пути в WORKDIR" >> analysis-results.md
+          ((ISSUE_COUNT++))
+        fi
+        
+        # Анализ Hadolint результатов
+        if [ -f hadolint-results.json ]; then
+          echo "" >> analysis-results.md
+          echo "### 🐳 Hadolint Results:" >> analysis-results.md
+          jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json >> analysis-results.md
+          HADOLINT_COUNT=$(jq '. | length' hadolint-results.json)
+          ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+        fi
+        
+        echo "" >> analysis-results.md
+        echo "---" >> analysis-results.md
+        echo "**Summary:** Найдено $ISSUE_COUNT проблем ($CRITICAL_COUNT критических)" >> analysis-results.md
+        
+        # Сохраняем счетчики в output
+        echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        
+    - name: Create or Update Issue
+      uses: actions/github-script@v6
+      if: steps.analysis.outputs.issue_count > 0
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('analysis-results.md', 'utf8');
+          const issueCount = ${{ steps.analysis.outputs.issue_count }};
+          const criticalCount = ${{ steps.analysis.outputs.critical_count }};
+          
+          const title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
+          
+          // Ищем существующий issue
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['dockerfile-security']
+          });
+          
+          const existingIssue = issues.find(issue => 
+            issue.title.includes('Dockerfile Security Issues')
+          );
+          
+          const body = `${report}
+          
+          ---
+          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+          `;
+          
+          if (existingIssue) {
+            // Обновляем существующий issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              title: title,
+              body: body
+            });
+            console.log(`Updated existing issue #${existingIssue.number}`);
+          } else {
+            // Создаем новый issue
+            const { data: newIssue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['dockerfile-security', 'security', 'ci-cd']
+            });
+            console.log(`Created new issue #${newIssue.number}`);
+          }
+          
+    - name: Close existing issue if no problems
+      uses: actions/github-script@v6
+      if: steps.analysis.outputs.issue_count == 0
+      with:
+        script: |
+          // Ищем открытый issue по безопасности Dockerfile
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['dockerfile-security']
+          });
+          
+          const existingIssue = issues.find(issue => 
+            issue.title.includes('Dockerfile Security Issues')
+          );
+          
+          if (existingIssue) {
+            // Закрываем issue с комментарием
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              state: 'closed'
+            });
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              body: `✅ Все проблемы в Dockerfile исправлены в коммите ${context.sha}`
+            });
+            
+            console.log(`Closed issue #${existingIssue.number}`);
+          }
+          
     - name: Fail if critical issues found
-      if: steps.report.outputs.total_issues > 0
+      if: steps.analysis.outputs.critical_count > 0
       run: |
-        echo "❌ Найдены проблемы в Dockerfile: ${{ steps.report.outputs.total_issues }}"
-        echo "Пожалуйста, исправьте их перед мерджем:"
-        echo "1. Проверьте отчет выше"
-        echo "2. Исправьте Dockerfile"
-        echo "3. Запушите исправления"
+        echo "❌ Найдены критические проблемы в Dockerfile: ${{ steps.analysis.outputs.critical_count }}"
+        echo "Пожалуйста, исправьте их перед мерджем"
+        echo "Подробности в созданном Issue"
         exit 1
+        
+    - name: Post PR comment
+      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request' && steps.analysis.outputs.issue_count > 0
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('analysis-results.md', 'utf8');
+          const issueCount = ${{ steps.analysis.outputs.issue_count }};
+          const criticalCount = ${{ steps.analysis.outputs.critical_count }};
+          
+          const commentBody = `## 🔍 Dockerfile Security Scan
+          
+          ${report}
+          
+          *Проверка выполнена автоматически*`;
+          
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: commentBody
+          });
