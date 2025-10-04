@@ -1,18 +1,17 @@
-# Используем официальный образ nginx
 FROM nginx:1.24-alpine
 
-# Устанавливаем метаданные
-LABEL maintainer="your-email@example.com"
-LABEL description="Production nginx server"
+# Создаем non-root пользователя
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S -D -H -u 1001 -G appgroup appuser
 
-# Копируем статические файлы
-COPY html /usr/share/nginx/html
+# Настраиваем права
+RUN chown -R appuser:appgroup /var/cache/nginx
 
-# Переключаемся на non-root пользователя (nginx уже существует в официальном образе)
-USER nginx
+# Копируем файлы
+COPY --chown=appuser:appgroup html /usr/share/nginx/html
 
-# Открываем порт
+# Используем non-root пользователя
+USER appuser
+
 EXPOSE 8080
-
-# Запускаем nginx
 CMD ["nginx", "-g", "daemon off;"]
