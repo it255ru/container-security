@@ -1,46 +1,86 @@
-name: Dockerfile Security Audit
+name: Docker Image Security Scan
 
 on:
-  pull_request:
-    branches: [ main ]
   push:
+    branches: [ main ]
+  pull_request:
     branches: [ main ]
 
 jobs:
-  dockerfile_audit:
+  docker-scan:
     runs-on: ubuntu-latest
-
+    
     steps:
-      # --- 0. Checkout ---
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # --- 1. Hadolint ---
-      - name: Dockerfile Lint (Hadolint)
-        run: |
-          echo "🔹 Checking Dockerfile with Hadolint..."
-          HADOLINT_OUTPUT=$(hadolint Dockerfile -f json || true)
-          if [ -z "$HADOLINT_OUTPUT" ] || [ "$HADOLINT_OUTPUT" = "[]" ]; then
-            echo "✅ No Hadolint issues found."
-          else
-            echo "$HADOLINT_OUTPUT" | jq -r '.[] | "Line \(.line): \(.code) - \(.message)"'
-            exit 1
-          fi
-
-      # --- 2. Build Docker image ---
-      - name: Build Docker image
-        run: docker build -t student-app:ci .
-
-      # --- 3. Trivy scan ---
-      - name: Trivy Vulnerability Scan
-        run: |
-          echo "🔹 Scanning Docker image with Trivy..."
-          trivy image --severity CRITICAL,HIGH --ignore-unfixed student-app:ci || true
-          # Проверяем наличие уязвимостей через exit code
-          VULNS=$(trivy image --severity CRITICAL,HIGH --ignore-unfixed -f json student-app:ci | jq '.Results[].Vulnerabilities | select(.!=null) | length')
-          if [ "$VULNS" -gt 0 ]; then
-            echo "❌ Found $VULNS CRITICAL/HIGH vulnerabilities in image"
-            exit 1
-          else
-            echo "✅ No critical/high vulnerabilities found."
-          fi
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Run Hadolint
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: Dockerfile
+        format: sarif
+        output-file: hadolint-results.sarif
+      continue-on-error: true
+      
+    - name: Build Docker image
+      run: |
+        docker build -t my-app:${{ github.sha }} .
+        
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: my-app:${{ github.sha }}
+        format: sarif
+        output: trivy-results.sarif
+        severity: HIGH,CRITICAL
+      continue-on-error: true
+      
+    - name: Generate compact report
+      id: report
+      run: |
+        # Анализируем результаты Hadolint
+        if [ -f hadolint-results.sarif ]; then
+          HADOLINT_ISSUES=$(jq '.runs[0].results | length' hadolint-results.sarif)
+        else
+          HADOLINT_ISSUES=0
+        fi
+        
+        # Анализируем результаты Trivy
+        if [ -f trivy-results.sarif ]; then
+          TRIVY_VULNERABILITIES=$(jq '.runs[0].results | length' trivy-results.sarif)
+        else
+          TRIVY_VULNERABILITIES=0
+        fi
+        
+        # Формируем компактный отчет
+        echo "## 🔍 Security Scan Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Hadolint Issues: $HADOLINT_ISSUES" >> $GITHUB_STEP_SUMMARY
+        if [ $HADOLINT_ISSUES -gt 0 ]; then
+          echo "❌ Найдены проблемы в Dockerfile:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (правило: \(.ruleId))"' hadolint-results.sarif >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ Dockerfile прошел проверку Hadolint" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Trivy Vulnerabilities: $TRIVY_VULNERABILITIES" >> $GITHUB_STEP_SUMMARY
+        if [ $TRIVY_VULNERABILITIES -gt 0 ]; then
+          echo "⚠️  Найдены уязвимости в образе:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) - \(.ruleId)"' trivy-results.sarif >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ Образ прошел проверку безопасности" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Устанавливаем выходные переменные
+        echo "total_issues=$((HADOLINT_ISSUES + TRIVY_VULNERABILITIES))" >> $GITHUB_OUTPUT
+        
+    - name: Fail if issues found
+      if: steps.report.outputs.total_issues > 0
+      run: |
+        echo "❌ Найдены проблемы: ${{ steps.report.outputs.total_issues }}"
+        echo "Пожалуйста, исправьте их перед мерджем"
+        exit 1
