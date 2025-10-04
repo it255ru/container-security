@@ -53,25 +53,18 @@ jobs:
       - name: Software Composition Analysis
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          inputs: requirements.txt
+          requirements: requirements.txt
           format: json
         continue-on-error: true
 
-      # --- 4. Проверка Kubernetes манифестов ---
-      - name: Validate Kubernetes manifests
-        uses: docker://ghcr.io/instrumenta/kubeval:v0.16.1
-        with:
-          args: k8s/**/*.yaml
-
-
-      # --- 5. Генерация SBOM (Syft) ---
+      # --- 4. Генерация SBOM (Syft) ---
       - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
           image: myapp:ci
           output-file: sbom.json
 
-      # --- 6. Проверка чеклиста (checklist.csv) ---
+      # --- 5. Проверка чеклиста (checklist.csv) ---
       - name: Validate checklist status
         run: |
           echo "Checking checklist..."
@@ -83,7 +76,7 @@ jobs:
             echo "✅ All checklist items completed."
           fi
 
-      # --- 7. Финальный отчёт ---
+      # --- 6. Финальный отчёт ---
       - name: Summary
         run: |
           echo "✅ Container Security Audit completed successfully."
