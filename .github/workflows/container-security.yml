@@ -35,52 +35,6 @@ jobs:
       continue-on-error: true
       run: |
         echo "🔄 Attempting to build Docker image..."
-        
-        # Создаем необходимые файлы если их нет
-        mkdir -p html
-        if [ ! -f "html/index.html" ]; then
-          echo '<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Test Page</h1></body></html>' > html/index.html
-        fi
-        
-        # Создаем nginx-minimal.conf если его нет
-        if [ ! -f "nginx-minimal.conf" ]; then
-          cat > nginx-minimal.conf << 'EOF'
-user nginx nginx;
-worker_processes 1;
-pid /var/run/nginx/nginx.pid;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    
-    server_tokens off;
-    
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-    
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    
-    server {
-        listen 8080;
-        server_name _;
-        root /var/www/html;
-        index index.html;
-        
-        location / {
-            try_files $uri $uri/ =404;
-        }
-    }
-}
-EOF
-        fi
-        
         echo "📁 Current directory structure:"
         ls -la
         echo "📁 HTML directory:"
