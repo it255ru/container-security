@@ -1,37 +1,50 @@
-FROM alpine:latest
+# Используем конкретную версию базового образа
+FROM node:18.20.4-alpine3.20
 
-RUN set -x \
- && addgroup -S stunnel \
- && adduser -S -G stunnel stunnel \
- && apk add --update --no-cache \
-        ca-certificates \
-        libintl \
-        openssl \
-        stunnel \
- && grep main /etc/apk/repositories > /etc/apk/main.repo \
- && apk add --update --no-cache --repositories-file=/etc/apk/main.repo \
-        gettext \
- && cp -v /usr/bin/envsubst /usr/local/bin/ \
- && apk del --purge \
-        gettext \
- && apk --no-network info openssl \
- && apk --no-network info stunnel
-COPY *.template openssl.cnf /srv/stunnel/
-COPY stunnel.sh /srv/
+# Устанавливаем метаданные
+LABEL maintainer="your-email@example.com"
+LABEL description="Production ready application"
 
-RUN set -x \
- && chmod +x /srv/stunnel.sh \
- && mkdir -p /var/run/stunnel /var/log/stunnel \
- && chown -vR stunnel:stunnel /var/run/stunnel /var/log/stunnel \
- && mv -v /etc/stunnel/stunnel.conf /etc/stunnel/stunnel.conf.original
+# Устанавливаем аргументы сборки
+ARG NODE_ENV=production
+ENV NODE_ENV=${NODE_ENV}
 
-ENTRYPOINT ["/srv/stunnel.sh"]
-CMD ["stunnel"]
+# Создаем non-root пользователя
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S appuser -u 1001 -G appgroup
 
-LABEL org.label-schema.name="dweomer/stunnel" \
-      org.label-schema.description="Stunnel on Alpine" \
-      org.label-schema.url="https://github.com/dweomer/dockerfiles-stunnel/" \
-      org.label-schema.usage="https://github.com/dweomer/dockerfiles-stunnel/blob/master/README.md" \
-      org.label-schema.vcs-url="https://github.com/dweomer/dockerfiles-stunnel/" \
-      org.label-schema.vendor="Jacob Blain Christen - mailto:dweomer5@gmail.com, https://github.com/dweomer, https://twitter.com/dweomer" \
-      org.label-schema.schema-version="1.0"
+# Устанавливаем рабочую директорию
+WORKDIR /app
+
+# Копируем файлы зависимостей
+COPY package*.json ./
+COPY pnpm-lock.yaml ./
+
+# Устанавливаем зависимости и очищаем кеш
+RUN npm install -g pnpm@9.0.0 && \
+    pnpm install --frozen-lockfile --prod && \
+    npm cache clean --force && \
+    rm -rf /tmp/*
+
+# Копируем исходный код
+COPY --chown=appuser:appgroup . .
+
+# Генерируем Prisma клиент (если используется)
+RUN if [ -f "prisma/schema.prisma" ]; then \
+      npx prisma generate; \
+    fi
+
+# Собираем приложение
+RUN npm run build
+
+# Меняем владельца файлов
+RUN chown -R appuser:appgroup /app
+
+# Переключаемся на non-root пользователя
+USER appuser
+
+# Открываем порт
+EXPOSE 3000
+
+# Запускаем приложение
+CMD ["node", "dist/main.js"]
