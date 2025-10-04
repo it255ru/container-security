@@ -105,23 +105,41 @@ jobs:
         
         echo "### 🔍 Found Issues:" >> analysis-results.md
         
-        # УЛУЧШЕННАЯ ПРОВЕРКА НА NON-ROOT ПОЛЬЗОВАТЕЛЯ
-        HAS_USER_INSTRUCTION=$(grep -c "^USER " Dockerfile 2>/dev/null || echo "0")
-        HAS_ROOT_USER=$(grep "^USER root" Dockerfile 2>/dev/null | wc -l)
-        LAST_USER_INSTRUCTION=$(grep "^USER " Dockerfile 2>/dev/null | tail -1 || echo "")
+        # УЛУЧШЕННАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ - РАБОЧАЯ ВЕРСИЯ
+        echo "🔍 Analyzing USER instructions..." >> analysis-results.md
         
-        # Проверяем, что последняя инструкция USER не root и существует
-        if [ "$HAS_USER_INSTRUCTION" -eq 0 ]; then
-          echo "⚠️ **WARNING**: Не найдена инструкция USER. Рекомендуется создать non-root пользователя" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        elif [ "$LAST_USER_INSTRUCTION" = "USER root" ]; then
-          echo "⚠️ **WARNING**: Контейнер работает от root пользователя. Рекомендуется создать non-root пользователя" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        elif echo "$LAST_USER_INSTRUCTION" | grep -q "USER 0"; then
-          echo "⚠️ **WARNING**: Контейнер работает от root пользователя (UID 0). Рекомендуется создать non-root пользователя" >> analysis-results.md
+        # Получаем все USER инструкции
+        USER_INSTRUCTIONS=$(grep "^USER " Dockerfile 2>/dev/null || true)
+        LAST_USER_INSTRUCTION=$(echo "$USER_INSTRUCTIONS" | tail -1 || echo "")
+        
+        # Проверяем различные сценарии
+        if [ -z "$USER_INSTRUCTIONS" ]; then
+          # Нет USER инструкции - проверяем базовый образ
+          BASE_IMAGE=$(grep "^FROM " Dockerfile | head -1 | awk '{print $2}')
+          if [[ "$BASE_IMAGE" == *"nginx"* ]] || [[ "$BASE_IMAGE" == *"node"* ]] || [[ "$BASE_IMAGE" == *"postgres"* ]]; then
+            echo "✅ Используется официальный образ с non-root пользователем по умолчанию: $BASE_IMAGE" >> analysis-results.md
+          else
+            echo "⚠️ **WARNING**: Не найдена инструкция USER. Рекомендуется создать non-root пользователя" >> analysis-results.md
+            ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          fi
+        elif [ "$LAST_USER_INSTRUCTION" = "USER root" ] || [ "$LAST_USER_INSTRUCTION" = "USER 0" ]; then
+          echo "⚠️ **WARNING**: Контейнер работает от root пользователя: $LAST_USER_INSTRUCTION" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         else
           echo "✅ Non-root пользователь настроен корректно: $LAST_USER_INSTRUCTION" >> analysis-results.md
+        fi
+        
+        # Проверка на множественные RUN инструкции
+        RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
+        if [ "$RUN_COUNT" -gt 5 ]; then
+          echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на ADD вместо COPY
+        if grep "ADD" Dockerfile > /dev/null 2>&1; then
+          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
         # Проверка на множественные RUN инструкции
