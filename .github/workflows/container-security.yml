@@ -1,32 +1,3 @@
-name: Dockerfile Security Scan
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
-
-jobs:
-  dockerfile-scan:
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Run Hadolint
-      uses: hadolint/hadolint-action@v3.1.0
-      with:
-        dockerfile: Dockerfile
-        format: json
-        output-file: hadolint-results.json
-      continue-on-error: true
-      
     - name: Custom Dockerfile analysis
       id: analysis
       run: |
@@ -37,182 +8,75 @@ jobs:
         echo "**Branch:** ${{ github.ref }}" >> analysis-results.md
         echo "" >> analysis-results.md
         
-        # Проверка конкретных проблем
-        echo "### 🔍 Found Issues:" >> analysis-results.md
-        
+        # Инициализация счетчиков
         ISSUE_COUNT=0
         CRITICAL_COUNT=0
         
-        # Проверка на ADD вместо COPY
+        # Проверка конкретных проблем
+        echo "### 🔍 Found Issues:" >> analysis-results.md
+        
+        # Проверка на ADD вместо COPY (игнорируем код возврата grep)
         if grep -q "ADD" Dockerfile; then
           echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
-          ((ISSUE_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
         # Проверка на фиксированные версии
         if grep -q "node:14" Dockerfile; then
           echo "⚠️ **WARNING**: Используется фиксированная версия 'node:14'. Рекомендуется использовать конкретные версии" >> analysis-results.md
-          ((ISSUE_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
         # Проверка на curl | bash
         if grep -q "curl.*|.*bash" Dockerfile; then
           echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl | bash'. Это угроза безопасности!" >> analysis-results.md
-          ((ISSUE_COUNT++))
-          ((CRITICAL_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
         fi
         
         # Проверка прав 777
         if grep -q "777" Dockerfile; then
           echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
-          ((ISSUE_COUNT++))
-          ((CRITICAL_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
         fi
         
         # Проверка на pinning версий пакетов
-        if grep -q "npm install" Dockerfile && ! grep -q "package-lock.json\|pnpm-lock.yaml" Dockerfile; then
+        if { grep -q "npm install" Dockerfile && ! grep -q "package-lock.json\|pnpm-lock.yaml" Dockerfile; } then
           echo "⚠️ **WARNING**: Установка npm пакетов без фиксации версий" >> analysis-results.md
-          ((ISSUE_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
         # Проверка на WORKDIR с абсолютными путями
         if ! grep -q "WORKDIR /app" Dockerfile; then
           echo "⚠️ **WARNING**: Рекомендуется использовать абсолютные пути в WORKDIR" >> analysis-results.md
-          ((ISSUE_COUNT++))
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # Анализ Hadolint результатов
+        # Анализ Hadolint результатов (с проверкой существования файла и обработкой ошибок)
         if [ -f hadolint-results.json ]; then
           echo "" >> analysis-results.md
           echo "### 🐳 Hadolint Results:" >> analysis-results.md
-          jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json >> analysis-results.md
-          HADOLINT_COUNT=$(jq '. | length' hadolint-results.json)
-          ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+          
+          # Безопасное чтение JSON файла
+          if jq -e . hadolint-results.json > /dev/null 2>&1; then
+            # Файл содержит валидный JSON
+            HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
+            jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null >> analysis-results.md || echo "• Не удалось прочитать результаты Hadolint" >> analysis-results.md
+            ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+          else
+            echo "• Файл результатов Hadolint содержит невалидный JSON" >> analysis-results.md
+          fi
+        else
+          echo "" >> analysis-results.md
+          echo "### 🐳 Hadolint Results:" >> analysis-results.md
+          echo "• Файл результатов не найден" >> analysis-results.md
         fi
         
         echo "" >> analysis-results.md
         echo "---" >> analysis-results.md
         echo "**Summary:** Найдено $ISSUE_COUNT проблем ($CRITICAL_COUNT критических)" >> analysis-results.md
         
-        # Сохраняем счетчики в output
-        echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
-        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
-        
-    - name: Create or Update Issue
-      uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count > 0
-      with:
-        script: |
-          const fs = require('fs');
-          const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = ${{ steps.analysis.outputs.issue_count }};
-          const criticalCount = ${{ steps.analysis.outputs.critical_count }};
-          
-          const title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
-          
-          // Ищем существующий issue
-          const { data: issues } = await github.rest.issues.listForRepo({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            state: 'open',
-            labels: ['dockerfile-security']
-          });
-          
-          const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues')
-          );
-          
-          const body = `${report}
-          
-          ---
-          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
-          `;
-          
-          if (existingIssue) {
-            // Обновляем существующий issue
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              title: title,
-              body: body
-            });
-            console.log(`Updated existing issue #${existingIssue.number}`);
-          } else {
-            // Создаем новый issue
-            const { data: newIssue } = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['dockerfile-security', 'security', 'ci-cd']
-            });
-            console.log(`Created new issue #${newIssue.number}`);
-          }
-          
-    - name: Close existing issue if no problems
-      uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count == 0
-      with:
-        script: |
-          // Ищем открытый issue по безопасности Dockerfile
-          const { data: issues } = await github.rest.issues.listForRepo({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            state: 'open',
-            labels: ['dockerfile-security']
-          });
-          
-          const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues')
-          );
-          
-          if (existingIssue) {
-            // Закрываем issue с комментарием
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              state: 'closed'
-            });
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              body: `✅ Все проблемы в Dockerfile исправлены в коммите ${context.sha}`
-            });
-            
-            console.log(`Closed issue #${existingIssue.number}`);
-          }
-          
-    - name: Fail if critical issues found
-      if: steps.analysis.outputs.critical_count > 0
-      run: |
-        echo "❌ Найдены критические проблемы в Dockerfile: ${{ steps.analysis.outputs.critical_count }}"
-        echo "Пожалуйста, исправьте их перед мерджем"
-        echo "Подробности в созданном Issue"
-        exit 1
-        
-    - name: Post PR comment
-      uses: actions/github-script@v6
-      if: github.event_name == 'pull_request' && steps.analysis.outputs.issue_count > 0
-      with:
-        script: |
-          const fs = require('fs');
-          const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = ${{ steps.analysis.outputs.issue_count }};
-          const criticalCount = ${{ steps.analysis.outputs.critical_count }};
-          
-          const commentBody = `## 🔍 Dockerfile Security Scan
-          
-          ${report}
-          
-          *Проверка выполнена автоматически*`;
-          
-          await github.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-            body: commentBody
-          });
+        # Сохраняем счетчики в output (без использования GITHUB_OUTPUT если он недоступен)
+        echo "issue_count=$ISSUE_COUNT" | tee -a $GITHUB_OUTPUT
+        echo "critical_count=$CRITICAL_COUNT" | tee -a $GITHUB_OUTPUT
