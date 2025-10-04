@@ -1,63 +1,51 @@
-# Используем конкретную версию Alpine с минимальным набором пакетов
-FROM alpine:3.20.0 AS builder
+FROM alpine:3.20.0 AS nginx-builder
 
-# Устанавливаем метаданные
-LABEL maintainer="security-team@example.com"
-LABEL description="Hardened nginx server"
+# Скачиваем и компилируем nginx без ненужных модулей
+RUN apk add --no-cache build-base pcre-dev zlib-dev openssl-dev && \
+    wget -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
+    tar -xzf nginx.tar.gz && \
+    cd nginx-1.24.0 && \
+    ./configure \
+        --prefix=/etc/nginx \
+        --sbin-path=/usr/sbin/nginx \
+        --modules-path=/usr/lib/nginx/modules \
+        --conf-path=/etc/nginx/nginx.conf \
+        --error-log-path=/var/log/nginx/error.log \
+        --http-log-path=/var/log/nginx/access.log \
+        --pid-path=/var/run/nginx.pid \
+        --lock-path=/var/run/nginx.lock \
+        --http-client-body-temp-path=/var/cache/nginx/client_temp \
+        --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+        --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+        --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+        --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+        --user=nginx \
+        --group=nginx \
+        --with-http_ssl_module \
+        --with-http_realip_module \
+        --with-http_gzip_static_module \
+        --without-http_autoindex_module \
+        --without-http_ssi_module \
+        --without-http_scgi_module \
+        --without-http_uwsgi_module \
+        --without-http_fastcgi_module && \
+    make && make install
 
-# Устанавливаем только необходимые пакеты и обновляем систему
-RUN apk add --no-cache --update \
-    nginx=1.24.0-r12 \
-    && apk upgrade --no-cache \
-    && rm -rf /var/cache/apk/*
-
-# Создаем необходимые директории с правильными правами
-RUN mkdir -p /var/run/nginx /var/tmp/nginx /var/log/nginx \
-    && chmod -R 755 /var/run/nginx /var/tmp/nginx /var/log/nginx
-
-# Копируем кастомную конфигурацию безопасности
-COPY nginx-security.conf /etc/nginx/nginx.conf
-COPY security-headers.conf /etc/nginx/conf.d/security-headers.conf
-COPY default-secure.conf /etc/nginx/conf.d/default.conf
-
-# Создаем non-root пользователя и группу
-RUN addgroup -g 1001 -S nginxgroup && \
-    adduser -S -D -H -u 1001 -G nginxgroup -s /sbin/nologin -g 'nginx user' nginxuser && \
-    chown -R nginxuser:nginxgroup /var/run/nginx /var/tmp/nginx /var/log/nginx /etc/nginx
-
-# Создаем простую статическую страницу
-RUN echo '<!DOCTYPE html><html><head><title>Secure Server</title></head><body><h1>Secure Nginx</h1></body></html>' > /var/www/html/index.html
-
-# Финальный образ - multi-stage для уменьшения поверхности атаки
 FROM alpine:3.20.0
 
-# Устанавливаем только необходимые runtime пакеты
-RUN apk add --no-cache --update \
-    nginx=1.24.0-r12 \
-    tzdata \
-    && apk upgrade --no-cache \
-    && rm -rf /var/cache/apk/* \
-    && addgroup -g 1001 -S nginxgroup \
-    && adduser -S -D -H -u 1001 -G nginxgroup -s /sbin/nologin -g 'nginx user' nginxuser
+RUN addgroup -S nginx && adduser -S -D -H -G nginx nginx
 
-# Копируем только необходимые файлы из builder стадии
-COPY --from=builder --chown=nginxuser:nginxgroup /etc/nginx /etc/nginx
-COPY --from=builder --chown=nginxuser:nginxgroup /var/www/html /var/www/html
-COPY --from=builder --chown=nginxuser:nginxgroup /var/run/nginx /var/run/nginx
-COPY --from=builder --chown=nginxuser:nginxgroup /var/tmp/nginx /var/tmp/nginx
-COPY --from=builder --chown=nginxuser:nginxgroup /var/log/nginx /var/log/nginx
+COPY --from=nginx-builder /usr/sbin/nginx /usr/sbin/nginx
+COPY --from=nginx-builder /etc/nginx /etc/nginx
 
-# Устанавливаем правильные права
-RUN chmod -R 755 /var/run/nginx /var/tmp/nginx /var/log/nginx /etc/nginx \
-    && chmod 644 /etc/nginx/nginx.conf /etc/nginx/conf.d/*.conf \
-    && find /var/www/html -type f -exec chmod 644 {} \; \
-    && find /var/www/html -type d -exec chmod 755 {} \;
+RUN mkdir -p /var/log/nginx /var/cache/nginx && \
+    chown -R nginx:nginx /var/log/nginx /var/cache/nginx
 
-# Переключаемся на non-root пользователя
-USER nginxuser
+COPY nginx-minimal.conf /etc/nginx/nginx.conf
+COPY --chown=nginx:nginx html /var/www/html
 
-# Открываем порт
+USER nginx
+
 EXPOSE 8080
 
-# Запускаем nginx
 CMD ["nginx", "-g", "daemon off;"]
