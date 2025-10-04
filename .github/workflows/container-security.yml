@@ -38,14 +38,13 @@ jobs:
         if docker build -t test-image . 2> build-errors.log 1> build-output.log; then
           echo "✅ Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
+          # Сохраняем успешный вывод в JSON
+          echo '{"success": true, "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
         else
           echo "❌ Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          # Сохраняем ошибки в удобочитаемом формате
-          echo "### Build Errors:" > build-results.md
-          echo '```' >> build-results.md
-          cat build-errors.log >> build-results.md
-          echo '```' >> build-results.md
+          # Сохраняем ошибки в JSON
+          echo '{"success": false, "error": "'$(cat build-errors.log | jq -R -s -c .)'", "output": "'$(cat build-output.log | jq -R -s -c .)'"}' > build-results.json
         fi
       
     - name: Check for .dockerignore
@@ -65,8 +64,8 @@ jobs:
       uses: aquasecurity/trivy-action@master
       with:
         image-ref: test-image
-        format: sarif
-        output: trivy-results.sarif
+        format: json
+        output: trivy-results.json
         severity: HIGH,CRITICAL
         exit-code: 0
       continue-on-error: true
@@ -156,10 +155,12 @@ jobs:
           echo "" >> analysis-results.md
           echo "### 🛠 Docker Build Results:" >> analysis-results.md
           echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
-          if [ -f build-results.md ]; then
-            cat build-results.md >> analysis-results.md
-          else
-            echo "Build errors were captured but details are not available." >> analysis-results.md
+          if [ -f build-results.json ]; then
+            BUILD_ERROR=$(jq -r '.error' build-results.json 2>/dev/null | jq -r . 2>/dev/null || echo "Build errors were captured but details are not available.")
+            echo "Build errors:" >> analysis-results.md
+            echo '```' >> analysis-results.md
+            echo "$BUILD_ERROR" >> analysis-results.md
+            echo '```' >> analysis-results.md
           fi
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
@@ -179,7 +180,11 @@ jobs:
           if jq -e . hadolint-results.json > /dev/null 2>&1; then
             HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
             if [ "$HADOLINT_COUNT" -gt 0 ]; then
-              jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null >> analysis-results.md || echo "• Ошибка обработки результатов Hadolint" >> analysis-results.md
+              echo "Found $HADOLINT_COUNT Hadolint issues:" >> analysis-results.md
+              jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null | head -10 >> analysis-results.md
+              if [ "$HADOLINT_COUNT" -gt 10 ]; then
+                echo "• ... and $((HADOLINT_COUNT - 10)) more issues" >> analysis-results.md
+              fi
             else
               echo "✅ No Hadolint issues found" >> analysis-results.md
             fi
@@ -194,23 +199,23 @@ jobs:
         
         # Анализ результатов Trivy
         TRIVY_COUNT=0
-        if [ -f trivy-results.sarif ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
+        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
           echo "" >> analysis-results.md
           echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
           
-          if jq -e . trivy-results.sarif > /dev/null 2>&1; then
-            TRIVY_COUNT=$(jq '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "0")
+          if jq -e . trivy-results.json > /dev/null 2>&1; then
+            TRIVY_COUNT=$(jq '.Results[0].Vulnerabilities | length' trivy-results.json 2>/dev/null || echo "0")
             if [ "$TRIVY_COUNT" -gt 0 ]; then
               echo "⚠️ **SECURITY**: Found $TRIVY_COUNT vulnerabilities in the image" >> analysis-results.md
-              jq -r '.runs[0].results[] | "• **\(.level)**: \(.message.text) (уязвимость: \(.ruleId))"' trivy-results.sarif 2>/dev/null | head -10 >> analysis-results.md
-              if [ "$TRIVY_COUNT" -gt 10 ]; then
-                echo "• ... and $((TRIVY_COUNT - 10)) more vulnerabilities" >> analysis-results.md
+              jq -r '.Results[0].Vulnerabilities[0:5][] | "• **\(.Severity)**: \(.VulnerabilityID) - \(.Title)"' trivy-results.json 2>/dev/null >> analysis-results.md
+              if [ "$TRIVY_COUNT" -gt 5 ]; then
+                echo "• ... and $((TRIVY_COUNT - 5)) more vulnerabilities" >> analysis-results.md
               fi
             else
               echo "✅ No vulnerabilities found by Trivy" >> analysis-results.md
             fi
           else
-            echo "• Невалидный SARIF файл результатов Trivy" >> analysis-results.md
+            echo "• Невалидный JSON файл результатов Trivy" >> analysis-results.md
           fi
         elif [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
           echo "" >> analysis-results.md
@@ -251,6 +256,74 @@ jobs:
           
           const title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
           
+          // Читаем JSON файлы с результатами
+          let buildResultsJson = '';
+          let hadolintResultsJson = '';
+          let trivyResultsJson = '';
+          
+          try {
+            if (fs.existsSync('build-results.json')) {
+              buildResultsJson = fs.readFileSync('build-results.json', 'utf8');
+              // Форматируем JSON для лучшей читаемости
+              buildResultsJson = JSON.stringify(JSON.parse(buildResultsJson), null, 2);
+            }
+          } catch (e) {
+            buildResultsJson = 'Error parsing build results JSON: ' + e.message;
+          }
+          
+          try {
+            if (fs.existsSync('hadolint-results.json')) {
+              hadolintResultsJson = fs.readFileSync('hadolint-results.json', 'utf8');
+              // Форматируем JSON для лучшей читаемости
+              hadolintResultsJson = JSON.stringify(JSON.parse(hadolintResultsJson), null, 2);
+            }
+          } catch (e) {
+            hadolintResultsJson = 'Error parsing Hadolint results JSON: ' + e.message;
+          }
+          
+          try {
+            if (fs.existsSync('trivy-results.json')) {
+              trivyResultsJson = fs.readFileSync('trivy-results.json', 'utf8');
+              // Форматируем JSON для лучшей читаемости
+              trivyResultsJson = JSON.stringify(JSON.parse(trivyResultsJson), null, 2);
+            }
+          } catch (e) {
+            trivyResultsJson = 'Error parsing Trivy results JSON: ' + e.message;
+          }
+          
+          // Создаем детальный отчет с JSON данными
+          const detailedReport = `${report}
+          
+          ## 📊 Full Scan Results (JSON)
+          
+          <details>
+          <summary>📋 Docker Build Results (JSON)</summary>
+          
+          \`\`\`json
+          ${buildResultsJson || 'No build results available'}
+          \`\`\`
+          </details>
+          
+          <details>
+          <summary>🐳 Hadolint Results (JSON)</summary>
+          
+          \`\`\`json
+          ${hadolintResultsJson || 'No Hadolint results available'}
+          \`\`\`
+          </details>
+          
+          <details>
+          <summary>🔍 Trivy Vulnerability Scan Results (JSON)</summary>
+          
+          \`\`\`json
+          ${trivyResultsJson || 'No Trivy results available'}
+          \`\`\`
+          </details>
+          
+          ---
+          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+          `;
+          
           // Ищем существующий issue
           const { data: issues } = await github.rest.issues.listForRepo({
             owner: context.repo.owner,
@@ -263,12 +336,6 @@ jobs:
             issue.title.includes('Dockerfile Security Issues')
           );
           
-          const body = `${report}
-          
-          ---
-          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
-          `;
-          
           if (existingIssue) {
             // Обновляем существующий issue
             await github.rest.issues.update({
@@ -276,7 +343,7 @@ jobs:
               repo: context.repo.repo,
               issue_number: existingIssue.number,
               title: title,
-              body: body
+              body: detailedReport
             });
             console.log(`Updated existing issue #${existingIssue.number}`);
           } else {
@@ -285,7 +352,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: title,
-              body: body,
+              body: detailedReport,
               labels: ['dockerfile-security', 'security', 'ci-cd']
             });
             console.log(`Created new issue #${newIssue.number}`);
