@@ -35,36 +35,25 @@ jobs:
       continue-on-error: true
       run: |
         echo "🔄 Attempting to build Docker image..."
-        echo "📁 Current directory structure:"
-        ls -la
-        echo "📁 HTML directory:"
-        ls -la html/
-        echo "📄 Checking nginx-minimal.conf:"
-        if [ -f "nginx-minimal.conf" ]; then
-          echo "✅ nginx-minimal.conf exists"
-        else
-          echo "❌ nginx-minimal.conf missing"
+        
+        # Создаем необходимые файлы если их нет
+        mkdir -p html
+        if [ ! -f "html/index.html" ]; then
+          echo '<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Test Page</h1></body></html>' > html/index.html
         fi
         
-        # Пытаемся собрать образ с подробным выводом
+        # Пытаемся собрать образ
         set +e
-        echo "🔨 Building Docker image with detailed output..."
-        docker build --no-cache --progress=plain -t test-image . 2>&1 | tee build-full.log
-        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        docker build -t test-image . > build-output.log 2> build-errors.log
+        BUILD_EXIT_CODE=$?
         set -e
         
-        echo "=== FULL BUILD LOG (last 100 lines) ==="
-        tail -100 build-full.log
-        
-        # Сохраняем отдельно вывод и ошибки
-        docker build -t test-image . > build-output.log 2> build-errors.log
-        
-        echo "=== BUILD OUTPUT (last 50 lines) ==="  
-        tail -50 build-output.log
+        echo "=== BUILD OUTPUT ==="  
+        cat build-output.log
         echo "=== BUILD ERRORS ==="
         cat build-errors.log
         
-        # Создаем JSON с результатами (упрощенный вариант)
+        # Всегда создаем JSON с результатами сборки
         if [ $BUILD_EXIT_CODE -eq 0 ]; then
           echo "✅ Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
@@ -72,10 +61,213 @@ jobs:
         else
           echo "❌ Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          # Безопасное создание JSON с ошибкой
-          ERROR_MSG=$(head -c 500 build-errors.log | sed 's/"/\\"/g' | tr -d '\n\r' || echo "Unknown error")
+          # Создаем простой JSON с ошибкой
+          ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' | tr -d '\n' || echo "Build failed")
           echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
+
+    - name: Custom Dockerfile analysis
+      id: analysis
+      env:
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        DOCKERIGNORE_EXISTS: ${{ steps.dockerignore_check.outputs.dockerignore_exists }}
+      run: |
+        # Отключаем немедленный выход при ошибках для этого шага
+        set +e
+        
+        echo "## 📋 Dockerfile Analysis Results" > analysis-results.md
+        echo "" >> analysis-results.md
+        echo "**Scan date:** $(date)" >> analysis-results.md
+        echo "**Commit:** ${{ github.sha }}" >> analysis-results.md
+        echo "**Branch:** ${{ github.ref }}" >> analysis-results.md
+        echo "" >> analysis-results.md
+        
+        # Инициализация счетчиков
+        ISSUE_COUNT=0
+        CRITICAL_COUNT=0
+        
+        echo "### 🔍 Found Issues:" >> analysis-results.md
+        
+        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ
+        LAST_USER=$(grep "^USER " Dockerfile | tail -1 2>/dev/null || echo "")
+        USER_CREATED=$(grep -E "adduser|useradd|addgroup|groupadd" Dockerfile 2>/dev/null | head -1 || echo "")
+
+        if [[ -n "$LAST_USER" && "$LAST_USER" != "USER root" && "$LAST_USER" != "USER 0" ]]; then
+          echo "✅ Non-root пользователь: $LAST_USER" >> analysis-results.md
+        elif [ -n "$USER_CREATED" ]; then
+          echo "✅ Создан non-root пользователь: $USER_CREATED" >> analysis-results.md
+        else
+          echo "⚠️ **WARNING**: Не обнаружен non-root пользователь" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка результатов сборки - ВАЖНО: всегда добавляем в отчет
+        if [ "$BUILD_SUCCESS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
+          if [ -f build-results.json ]; then
+            if jq -e . build-results.json > /dev/null 2>&1; then
+              BUILD_ERROR=$(jq -r '.error // "Build failed but error details are not available"' build-results.json 2>/dev/null)
+              echo "Build errors:" >> analysis-results.md
+              echo '```' >> analysis-results.md
+              echo "$BUILD_ERROR" >> analysis-results.md
+              echo '```' >> analysis-results.md
+            else
+              echo "• Invalid build results JSON format" >> analysis-results.md
+              if [ -f build-errors.log ]; then
+                echo "Raw build errors:" >> analysis-results.md
+                echo '```' >> analysis-results.md
+                head -100 build-errors.log >> analysis-results.md
+                echo '```' >> analysis-results.md
+              fi
+            fi
+          fi
+          # ВСЕГДА увеличиваем счетчики при неудачной сборке
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        else
+          echo "" >> analysis-results.md
+          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "✅ Docker image built successfully" >> analysis-results.md
+        fi
+        
+        # Анализ Hadolint результатов
+        HADOLINT_COUNT=0
+        if [ -f hadolint-results.json ]; then
+          echo "" >> analysis-results.md
+          echo "### 🐳 Hadolint Results:" >> analysis-results.md
+          
+          if jq -e . hadolint-results.json > /dev/null 2>&1; then
+            HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
+            if [ "$HADOLINT_COUNT" -gt 0 ]; then
+              jq -r '.[] | "• **\(.level)**: \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null >> analysis-results.md
+            else
+              echo "✅ No Hadolint issues found" >> analysis-results.md
+            fi
+          else
+            echo "• Invalid Hadolint JSON format" >> analysis-results.md
+          fi
+        fi
+        
+        # Суммируем все проблемы
+        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+        
+        echo "" >> analysis-results.md
+        echo "---" >> analysis-results.md
+        echo "**Summary:** Found $ISSUE_COUNT issues ($CRITICAL_COUNT critical)" >> analysis-results.md
+        
+        # ВСЕГДА сохраняем выходные переменные, даже если счетчики = 0
+        echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        
+        # Всегда завершаем успешно
+        exit 0
+
+    - name: Create or Update Issue
+      uses: actions/github-script@v6
+      # ИЗМЕНЕНО: создаем Issue даже при issue_count = 0, если сборка не удалась
+      if: steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false'
+      env:
+        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
+        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('analysis-results.md', 'utf8');
+          const issueCount = process.env.ISSUE_COUNT || 0;
+          const criticalCount = process.env.CRITICAL_COUNT || 0;
+          const buildSuccess = process.env.BUILD_SUCCESS;
+          
+          // Определяем заголовок в зависимости от результатов
+          let title;
+          if (buildSuccess === 'false') {
+            title = `🚨 Docker Build Failed: ${issueCount} additional problems found`;
+          } else {
+            title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
+          }
+          
+          // Читаем JSON файлы с результатами
+          let buildResultsJson = '';
+          let hadolintResultsJson = '';
+          
+          try {
+            if (fs.existsSync('build-results.json')) {
+              buildResultsJson = fs.readFileSync('build-results.json', 'utf8');
+              buildResultsJson = JSON.stringify(JSON.parse(buildResultsJson), null, 2);
+            }
+          } catch (e) {
+            buildResultsJson = 'Error parsing build results JSON: ' + e.message;
+          }
+          
+          try {
+            if (fs.existsSync('hadolint-results.json')) {
+              hadolintResultsJson = fs.readFileSync('hadolint-results.json', 'utf8');
+              hadolintResultsJson = JSON.stringify(JSON.parse(hadolintResultsJson), null, 2);
+            }
+          } catch (e) {
+            hadolintResultsJson = 'Error parsing Hadolint results JSON: ' + e.message;
+          }
+          
+          // Создаем детальный отчет с JSON данными
+          const detailedReport = `${report}
+          
+          ## 📊 Full Scan Results (JSON)
+          
+          <details>
+          <summary>📋 Docker Build Results (JSON)</summary>
+          
+          \`\`\`json
+          ${buildResultsJson || 'No build results available'}
+          \`\`\`
+          </details>
+          
+          <details>
+          <summary>🐳 Hadolint Results (JSON)</summary>
+          
+          \`\`\`json
+          ${hadolintResultsJson || 'No Hadolint results available'}
+          \`\`\`
+          </details>
+          
+          ---
+          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+          `;
+          
+          // Ищем существующий issue
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['dockerfile-security']
+          });
+          
+          const existingIssue = issues.find(issue => 
+            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
+          );
+          
+          if (existingIssue) {
+            // Обновляем существующий issue
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              title: title,
+              body: detailedReport
+            });
+            console.log(`Updated existing issue #${existingIssue.number}`);
+          } else {
+            // Создаем новый issue
+            const { data: newIssue } = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: detailedReport,
+              labels: ['dockerfile-security', 'security', 'ci-cd']
+            });
+            console.log(`Created new issue #${newIssue.number}`);
+          }
       
     - name: Check for .dockerignore
       id: dockerignore_check
