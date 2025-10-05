@@ -65,7 +65,30 @@ jobs:
           ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' | tr -d '\n' || echo "Build failed")
           echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
-
+      
+    - name: Check for .dockerignore
+      id: dockerignore_check
+      run: |
+        if [ -f ".dockerignore" ]; then
+          echo "✅ .dockerignore file found"
+          echo "dockerignore_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️ No .dockerignore file found"
+          echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: Run Trivy vulnerability scan
+      id: trivy_scan
+      if: steps.build.outputs.build_success == 'true' && steps.dockerignore_check.outputs.dockerignore_exists == 'true'
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: test-image
+        format: json
+        output: trivy-results.json
+        severity: HIGH,CRITICAL
+        exit-code: 0
+      continue-on-error: true
+      
     - name: Custom Dockerfile analysis
       id: analysis
       env:
@@ -101,7 +124,56 @@ jobs:
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # Проверка результатов сборки - ВАЖНО: всегда добавляем в отчет
+        # Другие проверки...
+        if grep "ADD" Dockerfile > /dev/null 2>&1; then
+          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на базовые образы без версий
+        if grep -E "FROM.*:(latest| )" Dockerfile > /dev/null 2>&1 || 
+           grep -E "^FROM [^:]+$" Dockerfile > /dev/null 2>&1; then
+          echo "⚠️ **WARNING**: Базовый образ без конкретной версии. Всегда указывайте версию тега" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на curl | bash
+        if grep -E "curl.*\|.*bash" Dockerfile > /dev/null 2>&1 || 
+           grep -E "wget.*\|.*bash" Dockerfile > /dev/null 2>&1; then
+          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        fi
+        
+        # Проверка прав 777
+        if grep -E "chmod.*777" Dockerfile > /dev/null 2>&1 || 
+           grep -E "777" Dockerfile > /dev/null 2>&1; then
+          echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+        fi
+        
+        # Проверка на установку пакетов без очистки кеша
+        if grep -E "(apt-get|apk|yum|dnf) install" Dockerfile > /dev/null 2>&1 && 
+           ! grep -E "(apt-get clean|rm -rf /var/cache/|apk cache clean|yum clean|dnf clean)" Dockerfile > /dev/null 2>&1; then
+          echo "⚠️ **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на множественные RUN инструкции
+        RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
+        if [ "$RUN_COUNT" -gt 5 ]; then
+          echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # Проверка на отсутствие .dockerignore
+        if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
+          echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
+          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        fi
+        
+        # ВАЖНО: Проверка результатов сборки - всегда добавляем в отчет
         if [ "$BUILD_SUCCESS" = "false" ]; then
           echo "" >> analysis-results.md
           echo "### 🛠 Docker Build Results:" >> analysis-results.md
@@ -150,8 +222,35 @@ jobs:
           fi
         fi
         
+        # Анализ Trivy результатов
+        TRIVY_COUNT=0
+        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          
+          if jq -e . trivy-results.json > /dev/null 2>&1; then
+            TRIVY_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' trivy-results.json 2>/dev/null || echo "0")
+            if [ "$TRIVY_COUNT" -gt 0 ]; then
+              echo "⚠️ **SECURITY**: Found $TRIVY_COUNT vulnerabilities" >> analysis-results.md
+              jq -r '.Results[0].Vulnerabilities[0:3][] | "• \(.VulnerabilityID): \(.Title) (\(.Severity))"' trivy-results.json 2>/dev/null >> analysis-results.md
+            else
+              echo "✅ No vulnerabilities found by Trivy" >> analysis-results.md
+            fi
+          else
+            echo "• Invalid Trivy JSON format" >> analysis-results.md
+          fi
+        elif [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          echo "⏭️ **SKIPPED**: Trivy scan skipped - no .dockerignore file" >> analysis-results.md
+        elif [ "$BUILD_SUCCESS" = "false" ]; then
+          echo "" >> analysis-results.md
+          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          echo "⏭️ **SKIPPED**: Trivy scan skipped - Docker build failed" >> analysis-results.md
+        fi
+        
         # Суммируем все проблемы
-        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT))
+        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT + TRIVY_COUNT))
         
         echo "" >> analysis-results.md
         echo "---" >> analysis-results.md
@@ -163,7 +262,7 @@ jobs:
         
         # Всегда завершаем успешно
         exit 0
-
+        
     - name: Create or Update Issue
       uses: actions/github-script@v6
       # ИЗМЕНЕНО: создаем Issue даже при issue_count = 0, если сборка не удалась
@@ -191,378 +290,11 @@ jobs:
           // Читаем JSON файлы с результатами
           let buildResultsJson = '';
           let hadolintResultsJson = '';
-          
-          try {
-            if (fs.existsSync('build-results.json')) {
-              buildResultsJson = fs.readFileSync('build-results.json', 'utf8');
-              buildResultsJson = JSON.stringify(JSON.parse(buildResultsJson), null, 2);
-            }
-          } catch (e) {
-            buildResultsJson = 'Error parsing build results JSON: ' + e.message;
-          }
-          
-          try {
-            if (fs.existsSync('hadolint-results.json')) {
-              hadolintResultsJson = fs.readFileSync('hadolint-results.json', 'utf8');
-              hadolintResultsJson = JSON.stringify(JSON.parse(hadolintResultsJson), null, 2);
-            }
-          } catch (e) {
-            hadolintResultsJson = 'Error parsing Hadolint results JSON: ' + e.message;
-          }
-          
-          // Создаем детальный отчет с JSON данными
-          const detailedReport = `${report}
-          
-          ## 📊 Full Scan Results (JSON)
-          
-          <details>
-          <summary>📋 Docker Build Results (JSON)</summary>
-          
-          \`\`\`json
-          ${buildResultsJson || 'No build results available'}
-          \`\`\`
-          </details>
-          
-          <details>
-          <summary>🐳 Hadolint Results (JSON)</summary>
-          
-          \`\`\`json
-          ${hadolintResultsJson || 'No Hadolint results available'}
-          \`\`\`
-          </details>
-          
-          ---
-          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
-          `;
-          
-          // Ищем существующий issue
-          const { data: issues } = await github.rest.issues.listForRepo({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            state: 'open',
-            labels: ['dockerfile-security']
-          });
-          
-          const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
-          );
-          
-          if (existingIssue) {
-            // Обновляем существующий issue
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              title: title,
-              body: detailedReport
-            });
-            console.log(`Updated existing issue #${existingIssue.number}`);
-          } else {
-            // Создаем новый issue
-            const { data: newIssue } = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: detailedReport,
-              labels: ['dockerfile-security', 'security', 'ci-cd']
-            });
-            console.log(`Created new issue #${newIssue.number}`);
-          }
-      
-    - name: Check for .dockerignore
-      id: dockerignore_check
-      run: |
-        if [ -f ".dockerignore" ]; then
-          echo "✅ .dockerignore file found"
-          echo "dockerignore_exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "⚠️ No .dockerignore file found"
-          echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
-        fi
-      
-    - name: Run Trivy vulnerability scan
-      id: trivy_scan
-      if: steps.build.outputs.build_success == 'true' && steps.dockerignore_check.outputs.dockerignore_exists == 'true'
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: test-image
-        format: json
-        output: trivy-results.json
-        severity: HIGH,CRITICAL
-        exit-code: 0
-      continue-on-error: true
-      
-    - name: Custom Dockerfile analysis
-      id: analysis
-      env:
-        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
-        DOCKERIGNORE_EXISTS: ${{ steps.dockerignore_check.outputs.dockerignore_exists }}
-      run: |
-        # Отключаем немедленный выход при ошибках для этого шага
-        set +e
-        
-        echo "## 📋 Dockerfile Analysis Results" > analysis-results.md
-        echo "" >> analysis-results.md
-        echo "**Scan date:** $(date)" >> analysis-results.md
-        echo "**Commit:** ${{ github.sha }}" >> analysis-results.md
-        echo "**Branch:** ${{ github.ref }}" >> analysis-results.md
-        echo "" >> analysis-results.md
-        
-        # Инициализация счетчиков
-        ISSUE_COUNT=0
-        CRITICAL_COUNT=0
-        
-        echo "### 🔍 Found Issues:" >> analysis-results.md
-        
-        # Универсальные проверки для любого Dockerfile
-        
-        # 1. Проверка на ADD вместо COPY (универсальная)
-        if grep "ADD" Dockerfile > /dev/null 2>&1; then
-          echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # 2. Проверка на базовые образы без версий (универсальная)
-        if grep -E "FROM.*:(latest| )" Dockerfile > /dev/null 2>&1 || 
-           grep -E "^FROM [^:]+$" Dockerfile > /dev/null 2>&1; then
-          echo "⚠️ **WARNING**: Базовый образ без конкретной версии. Всегда указывайте версию тега" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # 3. Проверка на curl | bash (универсальная и критическая)
-        if grep -E "curl.*\|.*bash" Dockerfile > /dev/null 2>&1 || 
-           grep -E "wget.*\|.*bash" Dockerfile > /dev/null 2>&1; then
-          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
-        fi
-        
-        # 4. Проверка прав 777 (универсальная и критическая)
-        if grep -E "chmod.*777" Dockerfile > /dev/null 2>&1 || 
-           grep -E "777" Dockerfile > /dev/null 2>&1; then
-          echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
-        fi
-        
-        # 5. Проверка на установку пакетов без очистки кеша (универсальная)
-        if grep -E "(apt-get|apk|yum|dnf) install" Dockerfile > /dev/null 2>&1 && 
-           ! grep -E "(apt-get clean|rm -rf /var/cache/|apk cache clean|yum clean|dnf clean)" Dockerfile > /dev/null 2>&1; then
-          echo "⚠️ **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # 6. Проверка на работу от root пользователя (универсальная)
-        # УНИВЕРСАЛЬНАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ
-        echo "### 👤 Non-Root User Analysis:" >> analysis-results.md
-        
-        # Получаем последнюю инструкцию USER (если есть)
-        LAST_USER_INSTRUCTION=$(grep "^USER " Dockerfile | tail -1 2>/dev/null || echo "")
-        
-        # Определяем базовый образ
-        BASE_IMAGE=$(grep "^FROM " Dockerfile | head -1 | awk '{print $2}' 2>/dev/null || echo "")
-        
-        # Флаг для определения наличия non-root пользователя
-        HAS_NON_ROOT_USER=false
-        REASON=""
-        
-        # Логика проверки в порядке приоритета:
-        if [ -n "$LAST_USER_INSTRUCTION" ]; then
-            # Случай 1: Есть явная инструкция USER и она не root/0
-            if [[ "$LAST_USER_INSTRUCTION" != "USER root" && "$LAST_USER_INSTRUCTION" != "USER 0" ]]; then
-                HAS_NON_ROOT_USER=true
-                REASON="Явно указан non-root пользователь: $LAST_USER_INSTRUCTION"
-            else
-                REASON="Явно указан root пользователь: $LAST_USER_INSTRUCTION"
-            fi
-        else
-            # Случай 2: Нет инструкции USER - проверяем базовые образы
-            case "$BASE_IMAGE" in
-                *nginx*)
-                    HAS_NON_ROOT_USER=true
-                    REASON="Образ nginx использует встроенного пользователя 'nginx'"
-                    ;;
-                *node*)
-                    HAS_NON_ROOT_USER=true  
-                    REASON="Образ node использует встроенного пользователя 'node'"
-                    ;;
-                *postgres*)
-                    HAS_NON_ROOT_USER=true
-                    REASON="Образ postgres использует встроенного пользователя 'postgres'"
-                    ;;
-                *redis*)
-                    HAS_NON_ROOT_USER=true
-                    REASON="Образ redis использует встроенного пользователя 'redis'"
-                    ;;
-                *mongo*)
-                    HAS_NON_ROOT_USER=true
-                    REASON="Образ mongo использует встроенного пользователя 'mongodb'"
-                    ;;
-                *elasticsearch*)
-                    HAS_NON_ROOT_USER=true
-                    REASON="Образ elasticsearch использует встроенного пользователя 'elasticsearch'"
-                    ;;
-                *)
-                    # Случай 3: Неизвестный образ - проверяем создание пользователей в RUN
-                    USER_CREATION_FOUND=$(grep -E "adduser|useradd|addgroup|groupadd" Dockerfile 2>/dev/null | head -1 || echo "")
-                    if [ -n "$USER_CREATION_FOUND" ]; then
-                        REASON="Пользователь создается, но не используется в USER: $USER_CREATION_FOUND"
-                    else
-                        REASON="Не обнаружено создание non-root пользователя"
-                    fi
-                    ;;
-            esac
-        fi
-        
-        # Вывод результата
-        if [ "$HAS_NON_ROOT_USER" = true ]; then
-            echo "✅ **PASS**: $REASON" >> analysis-results.md
-            # Рекомендуем явно указать USER для ясности
-            if [ -z "$LAST_USER_INSTRUCTION" ]; then
-                case "$BASE_IMAGE" in
-                    *nginx*) echo "   Рекомендуется явно указать: USER nginx" >> analysis-results.md ;;
-                    *node*) echo "   Рекомендуется явно указать: USER node" >> analysis-results.md ;;
-                    *postgres*) echo "   Рекомендуется явно указать: USER postgres" >> analysis-results.md ;;
-                esac
-            fi
-        else
-            echo "⚠️ **WARNING**: $REASON" >> analysis-results.md
-            echo "   Рекомендуется:" >> analysis-results.md
-            echo "   - Создать non-root пользователя (adduser/useradd)" >> analysis-results.md
-            echo "   - Указать USER инструкцию в конце Dockerfile" >> analysis-results.md
-            ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        echo "" >> analysis-results.md
-        
-        # 7. Проверка на множественные RUN инструкции (универсальная)
-        RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
-        if [ "$RUN_COUNT" -gt 5 ]; then
-          echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # 8. Проверка на отсутствие .dockerignore (универсальная)
-        if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
-          echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-        fi
-        
-        # Проверка результатов сборки
-        if [ "$BUILD_SUCCESS" = "false" ]; then
-          echo "" >> analysis-results.md
-          echo "### 🛠 Docker Build Results:" >> analysis-results.md
-          echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
-          if [ -f build-results.json ]; then
-            BUILD_ERROR=$(jq -r '.error' build-results.json 2>/dev/null | jq -r . 2>/dev/null || echo "Build errors were captured but details are not available.")
-            echo "Build errors:" >> analysis-results.md
-            echo '```' >> analysis-results.md
-            echo "$BUILD_ERROR" >> analysis-results.md
-            echo '```' >> analysis-results.md
-          fi
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
-        else
-          echo "" >> analysis-results.md
-          echo "### 🛠 Docker Build Results:" >> analysis-results.md
-          echo "✅ Docker image built successfully" >> analysis-results.md
-        fi
-        
-        # Анализ Hadolint результатов
-        HADOLINT_COUNT=0
-        if [ -f hadolint-results.json ]; then
-          echo "" >> analysis-results.md
-          echo "### 🐳 Hadolint Results:" >> analysis-results.md
-          
-          # Проверяем валидность JSON
-          if jq -e . hadolint-results.json > /dev/null 2>&1; then
-            HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
-            if [ "$HADOLINT_COUNT" -gt 0 ]; then
-              echo "Found $HADOLINT_COUNT Hadolint issues:" >> analysis-results.md
-              jq -r '.[] | "• **\(.level)**: Line \(.line): \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null | head -10 >> analysis-results.md
-              if [ "$HADOLINT_COUNT" -gt 10 ]; then
-                echo "• ... and $((HADOLINT_COUNT - 10)) more issues" >> analysis-results.md
-              fi
-            else
-              echo "✅ No Hadolint issues found" >> analysis-results.md
-            fi
-          else
-            echo "• Невалидный JSON файл результатов Hadolint" >> analysis-results.md
-          fi
-        else
-          echo "" >> analysis-results.md
-          echo "### 🐳 Hadolint Results:" >> analysis-results.md
-          echo "• Файл результатов не найден" >> analysis-results.md
-        fi
-        
-        # Анализ результатов Trivy
-        TRIVY_COUNT=0
-        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
-          echo "" >> analysis-results.md
-          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
-          
-          if jq -e . trivy-results.json > /dev/null 2>&1; then
-            TRIVY_COUNT=$(jq '.Results[0].Vulnerabilities | length' trivy-results.json 2>/dev/null || echo "0")
-            if [ "$TRIVY_COUNT" -gt 0 ]; then
-              echo "⚠️ **SECURITY**: Found $TRIVY_COUNT vulnerabilities in the image" >> analysis-results.md
-              jq -r '.Results[0].Vulnerabilities[0:5][] | "• **\(.Severity)**: \(.VulnerabilityID) - \(.Title)"' trivy-results.json 2>/dev/null >> analysis-results.md
-              if [ "$TRIVY_COUNT" -gt 5 ]; then
-                echo "• ... and $((TRIVY_COUNT - 5)) more vulnerabilities" >> analysis-results.md
-              fi
-            else
-              echo "✅ No vulnerabilities found by Trivy" >> analysis-results.md
-            fi
-          else
-            echo "• Невалидный JSON файл результатов Trivy" >> analysis-results.md
-          fi
-        elif [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
-          echo "" >> analysis-results.md
-          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
-          echo "⏭️ **SKIPPED**: Trivy scan skipped because .dockerignore file is missing" >> analysis-results.md
-        elif [ "$BUILD_SUCCESS" = "false" ]; then
-          echo "" >> analysis-results.md
-          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
-          echo "⏭️ **SKIPPED**: Trivy scan skipped because Docker build failed" >> analysis-results.md
-        fi
-        
-        # Суммируем все проблемы
-        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT + TRIVY_COUNT))
-        
-        echo "" >> analysis-results.md
-        echo "---" >> analysis-results.md
-        echo "**Summary:** Найдено $ISSUE_COUNT проблем ($CRITICAL_COUNT критических)" >> analysis-results.md
-        
-        # Сохраняем выходные переменные
-        echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
-        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
-        
-        # Всегда завершаем успешно, даже если есть проблемы
-        exit 0
-        
-    - name: Create or Update Issue
-      uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count > 0
-      env:
-        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
-        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
-      with:
-        script: |
-          const fs = require('fs');
-          const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = process.env.ISSUE_COUNT;
-          const criticalCount = process.env.CRITICAL_COUNT;
-          
-          const title = `🚨 Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
-          
-          // Читаем JSON файлы с результатами
-          let buildResultsJson = '';
-          let hadolintResultsJson = '';
           let trivyResultsJson = '';
           
           try {
             if (fs.existsSync('build-results.json')) {
               buildResultsJson = fs.readFileSync('build-results.json', 'utf8');
-              // Форматируем JSON для лучшей читаемости
               buildResultsJson = JSON.stringify(JSON.parse(buildResultsJson), null, 2);
             }
           } catch (e) {
@@ -572,7 +304,6 @@ jobs:
           try {
             if (fs.existsSync('hadolint-results.json')) {
               hadolintResultsJson = fs.readFileSync('hadolint-results.json', 'utf8');
-              // Форматируем JSON для лучшей читаемости
               hadolintResultsJson = JSON.stringify(JSON.parse(hadolintResultsJson), null, 2);
             }
           } catch (e) {
@@ -582,7 +313,6 @@ jobs:
           try {
             if (fs.existsSync('trivy-results.json')) {
               trivyResultsJson = fs.readFileSync('trivy-results.json', 'utf8');
-              // Форматируем JSON для лучшей читаемости
               trivyResultsJson = JSON.stringify(JSON.parse(trivyResultsJson), null, 2);
             }
           } catch (e) {
@@ -631,7 +361,7 @@ jobs:
           });
           
           const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues')
+            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
           );
           
           if (existingIssue) {
@@ -658,7 +388,7 @@ jobs:
           
     - name: Close existing issue if no problems
       uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count == 0
+      if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
       with:
         script: |
           // Ищем открытый issue по безопасности Dockerfile
@@ -670,7 +400,7 @@ jobs:
           });
           
           const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues')
+            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
           );
           
           if (existingIssue) {
@@ -702,18 +432,27 @@ jobs:
         
     - name: Post PR comment
       uses: actions/github-script@v6
-      if: github.event_name == 'pull_request' && steps.analysis.outputs.issue_count > 0
+      if: github.event_name == 'pull_request' && (steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false')
       env:
         ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
         CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
       with:
         script: |
           const fs = require('fs');
           const report = fs.readFileSync('analysis-results.md', 'utf8');
           const issueCount = process.env.ISSUE_COUNT;
           const criticalCount = process.env.CRITICAL_COUNT;
+          const buildSuccess = process.env.BUILD_SUCCESS;
           
-          const commentBody = `## 🔍 Dockerfile Security Scan
+          let commentTitle;
+          if (buildSuccess === 'false') {
+            commentTitle = '## 🔍 Dockerfile Security Scan - BUILD FAILED';
+          } else {
+            commentTitle = '## 🔍 Dockerfile Security Scan';
+          }
+          
+          const commentBody = `${commentTitle}
           
           ${report}
           
