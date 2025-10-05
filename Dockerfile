@@ -15,13 +15,14 @@ RUN wget --no-verbose -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.ta
 
 WORKDIR /tmp/nginx-1.24.0
 
+# Configure nginx to use writable paths for the nginx user
 RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
     --conf-path=/etc/nginx/nginx.conf \
-    --error-log-path=/var/log/nginx/error.log \
-    --http-log-path=/var/log/nginx/access.log \
-    --pid-path=/var/run/nginx.pid \
+    --error-log-path=/tmp/nginx/error.log \
+    --http-log-path=/tmp/nginx/access.log \
+    --pid-path=/tmp/nginx.pid \
     --user=nginx \
     --group=nginx \
     --with-http_ssl_module && \
@@ -33,7 +34,7 @@ FROM alpine:3.20.0
 RUN apk add --no-cache pcre zlib openssl && \
     addgroup -S nginx && \
     adduser -S -D -H -G nginx nginx && \
-    mkdir -p /var/log/nginx /var/www/html /var/run
+    mkdir -p /var/www/html /tmp/nginx
 
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /etc/nginx /etc/nginx
@@ -41,11 +42,12 @@ COPY --from=builder /etc/nginx /etc/nginx
 # Copy your configuration file
 COPY nginx-minimal.conf /etc/nginx/nginx.conf
 
-# Create simple HTML content
+# Create default HTML content
 RUN mkdir -p /var/www/html && \
     echo '<!DOCTYPE html><html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>' > /var/www/html/index.html
 
-RUN chown -R nginx:nginx /etc/nginx /var/www/html
+# Set ownership
+RUN chown -R nginx:nginx /var/www/html /etc/nginx /tmp/nginx
 
 USER nginx
 RUN nginx -t
