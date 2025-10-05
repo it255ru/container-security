@@ -17,7 +17,7 @@ RUN wget --progress=dot:giga -O nginx.tar.gz https://nginx.org/download/nginx-1.
 
 WORKDIR /tmp/nginx-1.24.0
 
-# Configure and build nginx
+# Configure and build nginx with proper paths
 RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
@@ -42,15 +42,22 @@ RUN apk add --no-cache \
     zlib \
     openssl && \
     addgroup -S nginx && \
-    adduser -S -D -H -G nginx nginx && \
-    mkdir -p /var/log/nginx /var/www/html /var/cache/nginx /var/run && \
-    chown -R nginx:nginx /var/log/nginx /var/www/html /var/cache/nginx /var/run
+    adduser -S -D -H -G nginx nginx
+
+# Create all necessary directories with proper permissions
+RUN mkdir -p \
+    /var/log/nginx \
+    /var/www/html \
+    /var/cache/nginx \
+    /var/run && \
+    chown -R nginx:nginx /var/log/nginx /var/www/html /var/cache/nginx && \
+    chmod -R 755 /var/run
 
 # Copy nginx binary and configuration from builder stage
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /etc/nginx /etc/nginx
 
-# Create necessary directories and set permissions
+# Create necessary nginx directories and set permissions
 RUN mkdir -p /etc/nginx/conf.d && \
     chown -R nginx:nginx /etc/nginx
 
@@ -58,10 +65,10 @@ RUN mkdir -p /etc/nginx/conf.d && \
 COPY nginx-minimal.conf /etc/nginx/nginx.conf
 COPY --chown=nginx:nginx html /var/www/html
 
-# Verify nginx binary works
+# Test nginx configuration (run as nginx user to avoid permission issues)
+USER nginx
 RUN nginx -t
 
-USER nginx
 EXPOSE 8080
 
 # Start nginx
