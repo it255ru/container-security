@@ -38,11 +38,12 @@ RUN apk add --no-cache pcre zlib openssl && \
 COPY --from=builder /usr/sbin/nginx /usr/sbin/nginx
 COPY --from=builder /etc/nginx /etc/nginx
 
-# Copy your configuration file instead of creating it
+# Copy your configuration file
 COPY nginx-minimal.conf /etc/nginx/nginx.conf
 
-# Copy or create default content
-COPY html /var/www/html/ || mkdir -p /var/www/html && echo '<h1>Hello from nginx</h1>' > /var/www/html/index.html
+# Create simple HTML content
+RUN mkdir -p /var/www/html && \
+    echo '<!DOCTYPE html><html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>' > /var/www/html/index.html
 
 RUN chown -R nginx:nginx /etc/nginx /var/www/html
 
