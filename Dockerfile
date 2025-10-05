@@ -1,18 +1,16 @@
 FROM alpine:3.20.0 AS builder
 
-# Устанавливаем рабочий каталог
 WORKDIR /tmp
 
-# Устанавливаем пакеты с фиксированными версиями
+# Устанавливаем пакеты без фиксированных версий (используем последние доступные)
 RUN apk add --no-cache \
-    build-base=0.5-r3 \
-    pcre-dev=8.45-r3 \
-    zlib-dev=1.2.13-r1 \
-    openssl-dev=3.1.4-r0 && \
+    build-base \
+    pcre-dev \
+    zlib-dev \
+    openssl-dev && \
     wget --progress=dot:giga -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
     tar -xzf nginx.tar.gz
 
-# Устанавливаем рабочий каталог для сборки nginx
 WORKDIR /tmp/nginx-1.24.0
 
 # Собираем nginx
@@ -21,11 +19,11 @@ RUN ./configure --prefix=/etc/nginx --user=nginx --group=nginx && \
 
 FROM alpine:3.20.0
 
-# Устанавливаем runtime зависимости
+# Устанавливаем runtime зависимости без фиксированных версий
 RUN apk add --no-cache \
-    pcre=8.45-r3 \
-    zlib=1.2.13-r1 \
-    openssl=3.1.4-r0 && \
+    pcre \
+    zlib \
+    openssl && \
     addgroup -S nginx && \
     adduser -S -D -H -G nginx nginx && \
     mkdir -p /var/log/nginx /var/www/html && \
