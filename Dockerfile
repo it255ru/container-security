@@ -2,15 +2,17 @@ FROM alpine:3.20.0 AS builder
 
 WORKDIR /tmp
 
+# Фиксируем версии пакетов (DL3018)
 RUN apk update && apk add --no-cache \
-    build-base \
-    pcre-dev \
-    zlib-dev \
-    openssl-dev \
-    wget \
-    tar
+    build-base=0.5-r3 \
+    pcre-dev=8.45-r3 \
+    zlib-dev=1.3.1-r1 \
+    openssl-dev=3.3.1-r0 \
+    wget=1.21.4-r0 \
+    tar=1.35-r2
 
-RUN wget --no-verbose -O nginx.tar.gz https://nginx.org/download/nginx-1.24.0.tar.gz && \
+# Кавычки для предотвращения word splitting (SC2046)
+RUN wget --no-verbose -O nginx.tar.gz "https://nginx.org/download/nginx-1.24.0.tar.gz" && \
     tar -xzf nginx.tar.gz
 
 WORKDIR /tmp/nginx-1.24.0
@@ -26,12 +28,16 @@ RUN ./configure \
     --user=nginx \
     --group=nginx \
     --with-http_ssl_module && \
-    make -j$(nproc) && \
+    make -j"$(nproc)" && \
     make install
 
 FROM alpine:3.20.0
 
-RUN apk add --no-cache pcre zlib openssl && \
+# Фиксируем версии runtime пакетов (DL3018)
+RUN apk add --no-cache \
+    pcre=8.45-r3 \
+    zlib=1.3.1-r1 \
+    openssl=3.3.1-r0 && \
     addgroup -S nginx && \
     adduser -S -D -H -G nginx nginx && \
     mkdir -p /var/log/nginx /var/www/html /var/run
