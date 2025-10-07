@@ -554,131 +554,131 @@ jobs:
                     }
                     
                     const commentBody = `## ${title}
-          
-          \`\`\`json
-          ${fileContent}
-          \`\`\`
-          
-          *Attached from ${filename}*`;
+    
+                    \`\`\`json
+                    ${fileContent}
+                    \`\`\`
                     
-                    await github.rest.issues.createComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      issue_number: issueNumber,
-                      body: commentBody
-                    });
-                    
-                    console.log(`✓ Added attachment: ${title}`);
-                  } catch (error) {
-                    console.log(`✗ Failed to add attachment ${title}: ${error.message}`);
-                  }
-                };
-                
-                // Добавляем SBOM как вложение
-                try {
-                  if (fs.existsSync('sbom.cyclonedx.json')) {
-                    const sbomContent = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
-                    await createAttachmentComment(
-                      'sbom.cyclonedx.json',
-                      'SBOM Analysis (CycloneDX)',
-                      sbomContent
-                    );
-                  }
-                } catch (e) {
-                  console.log('Failed to attach SBOM:', e.message);
-                }
-                
-                // Добавляем результаты сканирования уязвимостей
-                try {
-                  if (fs.existsSync('sbom-scan-results.json')) {
-                    const scanContent = fs.readFileSync('sbom-scan-results.json', 'utf8');
-                    await createAttachmentComment(
-                      'sbom-scan-results.json',
-                      'Vulnerability Scan Results',
-                      scanContent
-                    );
-                  }
-                } catch (e) {
-                  console.log('Failed to attach vulnerability scan results:', e.message);
-                }
-                
-                // Добавляем результаты Trivy
-                try {
-                  if (fs.existsSync('trivy-results.json')) {
-                    const trivyContent = fs.readFileSync('trivy-results.json', 'utf8');
-                    await createAttachmentComment(
-                      'trivy-results.json',
-                      'Trivy Security Scan',
-                      trivyContent
-                    );
-                  }
-                } catch (e) {
-                  console.log('Failed to attach Trivy results:', e.message);
-                }
-                
-                // Добавляем результаты Hadolint
-                try {
-                  if (fs.existsSync('hadolint-results.json')) {
-                    const hadolintContent = fs.readFileSync('hadolint-results.json', 'utf8');
-                    await createAttachmentComment(
-                      'hadolint-results.json',
-                      'Dockerfile Linter Results',
-                      hadolintContent
-                    );
-                  }
-                } catch (e) {
-                  console.log('Failed to attach Hadolint results:', e.message);
-                }
-                
-                // Добавляем результаты сборки
-                try {
-                  if (fs.existsSync('build-results.json')) {
-                    const buildContent = fs.readFileSync('build-results.json', 'utf8');
-                    await createAttachmentComment(
-                      'build-results.json',
-                      'Docker Build Results',
-                      buildContent
-                    );
-                  }
-                } catch (e) {
-                  console.log('Failed to attach build results:', e.message);
-                }
-                
-                console.log('All attachments added successfully');
-                
-          - name: Close existing issue if no problems
-            uses: actions/github-script@v6
-            if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
-            with:
-              script: |
-                const { data: issues } = await github.rest.issues.listForRepo({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  labels: ['dockerfile-security']
-                });
-                
-                const existingIssue = issues.find(issue => 
-                  issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
-                );
-                
-                if (existingIssue) {
-                  await github.rest.issues.update({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: existingIssue.number,
-                    state: 'closed'
-                  });
-                  
-                  await github.rest.issues.createComment({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: existingIssue.number,
-                    body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
-                  });
-                  
-                  console.log(`Closed issue #${existingIssue.number}`);
-                }
+                    *Attached from ${filename}*`;
+                              
+                              await github.rest.issues.createComment({
+                                owner: context.repo.owner,
+                                repo: context.repo.repo,
+                                issue_number: issueNumber,
+                                body: commentBody
+                              });
+                              
+                              console.log(`✓ Added attachment: ${title}`);
+                            } catch (error) {
+                              console.log(`✗ Failed to add attachment ${title}: ${error.message}`);
+                            }
+                          };
+                          
+                          // Добавляем SBOM как вложение
+                          try {
+                            if (fs.existsSync('sbom.cyclonedx.json')) {
+                              const sbomContent = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
+                              await createAttachmentComment(
+                                'sbom.cyclonedx.json',
+                                'SBOM Analysis (CycloneDX)',
+                                sbomContent
+                              );
+                            }
+                          } catch (e) {
+                            console.log('Failed to attach SBOM:', e.message);
+                          }
+                          
+                          // Добавляем результаты сканирования уязвимостей
+                          try {
+                            if (fs.existsSync('sbom-scan-results.json')) {
+                              const scanContent = fs.readFileSync('sbom-scan-results.json', 'utf8');
+                              await createAttachmentComment(
+                                'sbom-scan-results.json',
+                                'Vulnerability Scan Results',
+                                scanContent
+                              );
+                            }
+                          } catch (e) {
+                            console.log('Failed to attach vulnerability scan results:', e.message);
+                          }
+                          
+                          // Добавляем результаты Trivy
+                          try {
+                            if (fs.existsSync('trivy-results.json')) {
+                              const trivyContent = fs.readFileSync('trivy-results.json', 'utf8');
+                              await createAttachmentComment(
+                                'trivy-results.json',
+                                'Trivy Security Scan',
+                                trivyContent
+                              );
+                            }
+                          } catch (e) {
+                            console.log('Failed to attach Trivy results:', e.message);
+                          }
+                          
+                          // Добавляем результаты Hadolint
+                          try {
+                            if (fs.existsSync('hadolint-results.json')) {
+                              const hadolintContent = fs.readFileSync('hadolint-results.json', 'utf8');
+                              await createAttachmentComment(
+                                'hadolint-results.json',
+                                'Dockerfile Linter Results',
+                                hadolintContent
+                              );
+                            }
+                          } catch (e) {
+                            console.log('Failed to attach Hadolint results:', e.message);
+                          }
+                          
+                          // Добавляем результаты сборки
+                          try {
+                            if (fs.existsSync('build-results.json')) {
+                              const buildContent = fs.readFileSync('build-results.json', 'utf8');
+                              await createAttachmentComment(
+                                'build-results.json',
+                                'Docker Build Results',
+                                buildContent
+                              );
+                            }
+                          } catch (e) {
+                            console.log('Failed to attach build results:', e.message);
+                          }
+                          
+                          console.log('All attachments added successfully');
+          
+    - name: Close existing issue if no problems
+      uses: actions/github-script@v6
+      if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
+      with:
+        script: |
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['dockerfile-security']
+          });
+          
+          const existingIssue = issues.find(issue => 
+            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
+          );
+          
+          if (existingIssue) {
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              state: 'closed'
+            });
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existingIssue.number,
+              body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
+            });
+            
+            console.log(`Closed issue #${existingIssue.number}`);
+          }
           
     - name: Fail if critical issues found
       if: steps.analysis.outputs.critical_count > 0
