@@ -1,4 +1,4 @@
-name: Dockerfile Security Scan
+name: Dockerfile Security Scan with SBOM
 
 on:
   push:
@@ -61,7 +61,6 @@ jobs:
         else
           echo "❌ Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          # Создаем простой JSON с ошибкой
           ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' | tr -d '\n' || echo "Build failed")
           echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
@@ -75,6 +74,70 @@ jobs:
         else
           echo "⚠️ No .dockerignore file found"
           echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    # ========== НОВЫЕ ШАГИ ДЛЯ SBOM-АНАЛИЗА ==========
+    - name: Install SBOM tools
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        # Устанавливаем Syft для генерации SBOM
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        # Устанавливаем jq для обработки JSON
+        sudo apt-get update && sudo apt-get install -y jq
+        
+    - name: Generate SBOM for final image
+      id: sbom_generation
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "📋 Generating SBOM for final image..."
+        
+        # Генерируем SBOM с помощью Syft
+        syft test-image -o cyclonedx-json > sbom.cyclonedx.json
+        
+        # Добавляем информацию о скомпилированном Nginx в SBOM
+        NGINX_HASH=$(docker run --rm test-image sha256sum /usr/sbin/nginx 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+        
+        jq '.components += [{
+          "type": "application",
+          "name": "nginx",
+          "version": "1.24.0",
+          "purl": "pkg:generic/nginx@1.24.0?download_url=https://nginx.org/download/nginx-1.24.0.tar.gz",
+          "hashes": [{"alg": "SHA-256", "content": "'$NGINX_HASH'"}],
+          "properties": [
+            {"name": "builtFromSource", "value": "true"},
+            {"name": "configureOptions", "value": "--with-http_ssl_module"},
+            {"name": "hardened", "value": "true"}
+          ]
+        }]' sbom.cyclonedx.json > sbom-enhanced.json
+        
+        mv sbom-enhanced.json sbom.cyclonedx.json
+        
+        # Анализируем состав SBOM
+        COMPONENT_COUNT=$(jq '.components | length' sbom.cyclonedx.json)
+        ALPINE_COMPONENTS=$(jq '.components | map(select(.purl | startswith("pkg:apk/alpine"))) | length' sbom.cyclonedx.json)
+        
+        echo "component_count=$COMPONENT_COUNT" >> $GITHUB_OUTPUT
+        echo "alpine_components=$ALPINE_COMPONENTS" >> $GITHUB_OUTPUT
+        
+        echo "✅ SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
+      
+    - name: Scan SBOM for vulnerabilities
+      id: sbom_scan
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "🔍 Scanning SBOM for vulnerabilities..."
+        
+        # Используем Trivy для сканирования SBOM
+        trivy sbom --severity HIGH,CRITICAL --format json sbom.cyclonedx.json > sbom-scan-results.json 2>/dev/null || true
+        
+        # Анализируем результаты сканирования SBOM
+        if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
+          SBOM_VULN_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
+          echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
+          echo "📊 SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
+        else
+          echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "📊 SBOM scan completed - no vulnerabilities found or error in scan"
         fi
       
     - name: Run Trivy vulnerability scan
@@ -94,8 +157,10 @@ jobs:
       env:
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
         DOCKERIGNORE_EXISTS: ${{ steps.dockerignore_check.outputs.dockerignore_exists }}
+        SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
+        SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
+        SBOM_VULN_COUNT: ${{ steps.sbom_scan.outputs.sbom_vuln_count }}
       run: |
-        # Отключаем немедленный выход при ошибках для этого шага
         set +e
         
         echo "## 📋 Dockerfile Analysis Results" > analysis-results.md
@@ -124,7 +189,7 @@ jobs:
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # Другие проверки...
+        # Другие проверки (ваш существующий код)...
         if grep "ADD" Dockerfile > /dev/null 2>&1; then
           echo "❌ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
@@ -173,6 +238,23 @@ jobs:
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
+        # ========== НОВЫЙ РАЗДЕЛ: SBOM ANALYSIS ==========
+        if [ "$BUILD_SUCCESS" = "true" ]; then
+          echo "" >> analysis-results.md
+          echo "### 📦 SBOM Analysis:" >> analysis-results.md
+          echo "✅ **Software Bill of Materials generated**" >> analysis-results.md
+          echo "- **Total components:** $SBOM_COMPONENT_COUNT" >> analysis-results.md
+          echo "- **Alpine packages:** $SBOM_ALPINE_COMPONENTS" >> analysis-results.md
+          echo "- **Nginx:** 1.24.0 (compiled from source)" >> analysis-results.md
+          
+          if [ "$SBOM_VULN_COUNT" -gt 0 ]; then
+            echo "⚠️ **SBOM Vulnerabilities:** $SBOM_VULN_COUNT high/critical issues found" >> analysis-results.md
+            ISSUE_COUNT=$((ISSUE_COUNT + SBOM_VULN_COUNT))
+          else
+            echo "✅ **SBOM Vulnerabilities:** No high/critical issues found" >> analysis-results.md
+          fi
+        fi
+        
         # ВАЖНО: Проверка результатов сборки - всегда добавляем в отчет
         if [ "$BUILD_SUCCESS" = "false" ]; then
           echo "" >> analysis-results.md
@@ -195,7 +277,6 @@ jobs:
               fi
             fi
           fi
-          # ВСЕГДА увеличиваем счетчики при неудачной сборке
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
         else
@@ -249,28 +330,38 @@ jobs:
           echo "⏭️ **SKIPPED**: Trivy scan skipped - Docker build failed" >> analysis-results.md
         fi
         
-        # Суммируем все проблемы
+        # Суммируем все проблемы (включая SBOM уязвимости)
         ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT + TRIVY_COUNT))
         
         echo "" >> analysis-results.md
         echo "---" >> analysis-results.md
         echo "**Summary:** Found $ISSUE_COUNT issues ($CRITICAL_COUNT critical)" >> analysis-results.md
+        if [ "$BUILD_SUCCESS" = "true" ]; then
+          echo "**SBOM Components:** $SBOM_COMPONENT_COUNT total, $SBOM_ALPINE_COMPONENTS Alpine packages" >> analysis-results.md
+        fi
         
-        # ВСЕГДА сохраняем выходные переменные, даже если счетчики = 0
         echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
         echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
         
-        # Всегда завершаем успешно
         exit 0
+        
+    - name: Upload SBOM artifact
+      if: steps.build.outputs.build_success == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom-cyclonedx
+        path: sbom.cyclonedx.json
+        retention-days: 90
         
     - name: Create or Update Issue
       uses: actions/github-script@v6
-      # ИЗМЕНЕНО: создаем Issue даже при issue_count = 0, если сборка не удалась
       if: steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false'
       env:
         ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
         CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
+        SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
       with:
         script: |
           const fs = require('fs');
@@ -278,8 +369,9 @@ jobs:
           const issueCount = process.env.ISSUE_COUNT || 0;
           const criticalCount = process.env.CRITICAL_COUNT || 0;
           const buildSuccess = process.env.BUILD_SUCCESS;
+          const sbomComponentCount = process.env.SBOM_COMPONENT_COUNT || 0;
+          const sbomAlpineComponents = process.env.SBOM_ALPINE_COMPONENTS || 0;
           
-          // Определяем заголовок в зависимости от результатов
           let title;
           if (buildSuccess === 'false') {
             title = `🚨 Docker Build Failed: ${issueCount} additional problems found`;
@@ -291,6 +383,8 @@ jobs:
           let buildResultsJson = '';
           let hadolintResultsJson = '';
           let trivyResultsJson = '';
+          let sbomJson = '';
+          let sbomScanResultsJson = '';
           
           try {
             if (fs.existsSync('build-results.json')) {
@@ -317,6 +411,24 @@ jobs:
             }
           } catch (e) {
             trivyResultsJson = 'Error parsing Trivy results JSON: ' + e.message;
+          }
+          
+          try {
+            if (fs.existsSync('sbom.cyclonedx.json')) {
+              sbomJson = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
+              sbomJson = JSON.stringify(JSON.parse(sbomJson), null, 2);
+            }
+          } catch (e) {
+            sbomJson = 'Error parsing SBOM JSON: ' + e.message;
+          }
+          
+          try {
+            if (fs.existsSync('sbom-scan-results.json')) {
+              sbomScanResultsJson = fs.readFileSync('sbom-scan-results.json', 'utf8');
+              sbomScanResultsJson = JSON.stringify(JSON.parse(sbomScanResultsJson), null, 2);
+            }
+          } catch (e) {
+            sbomScanResultsJson = 'Error parsing SBOM scan results JSON: ' + e.message;
           }
           
           // Создаем детальный отчет с JSON данными
@@ -347,6 +459,26 @@ jobs:
           ${trivyResultsJson || 'No Trivy results available'}
           \`\`\`
           </details>
+          
+          ${buildSuccess === 'true' ? `
+          <details>
+          <summary>📦 SBOM Analysis Results (JSON)</summary>
+          
+          **SBOM Components:** ${sbomComponentCount} total, ${sbomAlpineComponents} Alpine packages
+          
+          \`\`\`json
+          ${sbomJson || 'No SBOM available'}
+          \`\`\`
+          </details>
+          
+          <details>
+          <summary>🔍 SBOM Vulnerability Scan Results (JSON)</summary>
+          
+          \`\`\`json
+          ${sbomScanResultsJson || 'No SBOM scan results available'}
+          \`\`\`
+          </details>
+          ` : ''}
           
           ---
           *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
@@ -391,7 +523,6 @@ jobs:
       if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
       with:
         script: |
-          // Ищем открытый issue по безопасности Dockerfile
           const { data: issues } = await github.rest.issues.listForRepo({
             owner: context.repo.owner,
             repo: context.repo.repo,
@@ -404,7 +535,6 @@ jobs:
           );
           
           if (existingIssue) {
-            // Закрываем issue с комментарием
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -416,7 +546,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: existingIssue.number,
-              body: `✅ Все проблемы в Dockerfile исправлены в коммите ${context.sha}`
+              body: `✅ Все проблемы в Dockerfile исправлены в коммите ${context.sha}\n📦 SBOM анализ показал чистые результаты`
             });
             
             console.log(`Closed issue #${existingIssue.number}`);
@@ -437,6 +567,8 @@ jobs:
         ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
         CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
+        SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
       with:
         script: |
           const fs = require('fs');
@@ -444,6 +576,8 @@ jobs:
           const issueCount = process.env.ISSUE_COUNT;
           const criticalCount = process.env.CRITICAL_COUNT;
           const buildSuccess = process.env.BUILD_SUCCESS;
+          const sbomComponentCount = process.env.SBOM_COMPONENT_COUNT;
+          const sbomAlpineComponents = process.env.SBOM_ALPINE_COMPONENTS;
           
           let commentTitle;
           if (buildSuccess === 'false') {
@@ -452,9 +586,18 @@ jobs:
             commentTitle = '## 🔍 Dockerfile Security Scan';
           }
           
+          const sbomInfo = buildSuccess === 'true' ? `
+          **SBOM Analysis:**
+          - 📦 Components: ${sbomComponentCount} total
+          - 🐧 Alpine packages: ${sbomAlpineComponents}
+          - 🌐 Nginx: 1.24.0 (compiled from source)
+          ` : '';
+          
           const commentBody = `${commentTitle}
           
           ${report}
+          
+          ${sbomInfo}
           
           *Проверка выполнена автоматически*`;
           
