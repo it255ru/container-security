@@ -10,6 +10,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  packages: write  # Добавлено для сохранения артефактов в package
 
 jobs:
   dockerfile-scan:
@@ -22,6 +23,7 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       
+    # ========== LINTING STAGE ==========
     - name: Run Hadolint
       uses: hadolint/hadolint-action@v3.1.0
       with:
@@ -30,6 +32,16 @@ jobs:
         output-file: hadolint-results.json
       continue-on-error: true
       
+    - name: Check for .dockerignore
+      id: dockerignore_check
+      run: |
+        if [ -f ".dockerignore" ]; then
+          echo "dockerignore_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    # ========== BUILD STAGE ==========
     - name: Try to build Docker image
       id: build
       continue-on-error: true
@@ -42,9 +54,9 @@ jobs:
           echo '<!DOCTYPE html><html><head><title>Test</title></head><body><h1>Test Page</h1></body></html>' > html/index.html
         fi
         
-        # Пытаемся собрать образ
+        # Пытаемся собрать образ с тегом
         set +e
-        docker build -t test-image . > build-output.log 2> build-errors.log
+        docker build -t test-image:latest -t test-image:${{ github.sha }} . > build-output.log 2> build-errors.log
         BUILD_EXIT_CODE=$?
         set -e
         
@@ -55,33 +67,29 @@ jobs:
         
         # Всегда создаем JSON с результатами сборки
         if [ $BUILD_EXIT_CODE -eq 0 ]; then
-          echo "[v] Docker build successful"
+          echo "Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
           echo '{"success": true, "message": "Build completed successfully"}' > build-results.json
         else
-          echo "[x] Docker build failed"
+          echo "Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
-          ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' | tr -d '\n' || echo "Build failed")
+          ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' || echo "Build failed")
           echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
-      
-    - name: Check for .dockerignore
-      id: dockerignore_check
-      run: |
-        if [ -f ".dockerignore" ]; then
-          echo "[v] .dockerignore file found"
-          echo "dockerignore_exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "[!] No .dockerignore file found"
-          echo "dockerignore_exists=false" >> $GITHUB_OUTPUT
-        fi
 
-    # ========== НОВЫЕ ШАГИ ДЛЯ SBOM-АНАЛИЗА ==========
-    - name: Install SBOM tools
+    # ========== SBOM & SECURITY SCAN STAGE ==========
+    - name: Install SBOM and security tools
       if: steps.build.outputs.build_success == 'true'
       run: |
         # Устанавливаем Syft для генерации SBOM
         curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        
+        # Устанавливаем Trivy для сканирования уязвимостей
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        
+        # Устанавливаем Grype для сканирования SBOM
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        
         # Устанавливаем jq для обработки JSON
         sudo apt-get update && sudo apt-get install -y jq
         
@@ -89,13 +97,13 @@ jobs:
       id: sbom_generation
       if: steps.build.outputs.build_success == 'true'
       run: |
-        echo "📋 Generating SBOM for final image..."
+        echo "Generating SBOM for final image..."
         
         # Генерируем SBOM с помощью Syft
-        syft test-image -o cyclonedx-json > sbom.cyclonedx.json
+        syft test-image:latest -o cyclonedx-json > sbom.cyclonedx.json
         
         # Добавляем информацию о скомпилированном Nginx в SBOM
-        NGINX_HASH=$(docker run --rm test-image sha256sum /usr/sbin/nginx 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+        NGINX_HASH=$(docker run --rm test-image:latest sha256sum /usr/sbin/nginx 2>/dev/null | cut -d' ' -f1 || echo "unknown")
         
         # Исправленная команда jq - более безопасная обработка
         jq '.components += [{
@@ -113,48 +121,52 @@ jobs:
         
         mv sbom-enhanced.json sbom.cyclonedx.json
         
-        # ИСПРАВЛЕННЫЙ АНАЛИЗ SBOM - безопасная обработка purl
+        # Анализ SBOM
         COMPONENT_COUNT=$(jq '.components | length' sbom.cyclonedx.json)
-        
-        # Безопасный подсчет Alpine компонентов - проверяем наличие purl и его тип
         ALPINE_COMPONENTS=$(jq '[.components[] | select(.purl != null) | select(.purl | type == "string") | select(.purl | startswith("pkg:apk/alpine"))] | length' sbom.cyclonedx.json)
         
         echo "component_count=$COMPONENT_COUNT" >> $GITHUB_OUTPUT
         echo "alpine_components=$ALPINE_COMPONENTS" >> $GITHUB_OUTPUT
         
-        echo "[v] SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
+        echo "SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
       
-    - name: Scan SBOM for vulnerabilities
+    - name: Scan SBOM for vulnerabilities with Grype
       id: sbom_scan
       if: steps.build.outputs.build_success == 'true'
       run: |
-        echo "Scanning SBOM for vulnerabilities..."
+        echo "Scanning SBOM for vulnerabilities with Grype..."
         
-        # Используем Trivy для сканирования SBOM
-        trivy sbom --severity HIGH,CRITICAL --format json sbom.cyclonedx.json > sbom-scan-results.json 2>/dev/null || true
+        # Используем Grype для сканирования SBOM
+        grype sbom:sbom.cyclonedx.json --output json --fail-on high > sbom-scan-results.json 2>/dev/null || true
         
         # Анализируем результаты сканирования SBOM
         if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
-          SBOM_VULN_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
+          SBOM_VULN_COUNT=$(jq '.matches // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
           echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
           echo "SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
+          
+          # Сохраняем краткий отчет
+          if [ "$SBOM_VULN_COUNT" -gt 0 ]; then
+            grype sbom:sbom.cyclonedx.json --output table > sbom-vulnerabilities.txt
+          fi
         else
           echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
           echo "SBOM scan completed - no vulnerabilities found or error in scan"
         fi
       
-    - name: Run Trivy vulnerability scan
+    - name: Run Trivy vulnerability scan on image
       id: trivy_scan
-      if: steps.build.outputs.build_success == 'true' && steps.dockerignore_check.outputs.dockerignore_exists == 'true'
+      if: steps.build.outputs.build_success == 'true'
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: test-image
+        image-ref: test-image:latest
         format: json
         output: trivy-results.json
         severity: HIGH,CRITICAL
         exit-code: 0
       continue-on-error: true
-      
+
+    # ========== ANALYSIS & REPORTING STAGE ==========
     - name: Custom Dockerfile analysis
       id: analysis
       env:
@@ -192,7 +204,7 @@ jobs:
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
         fi
         
-        # Другие проверки (ваш существующий код)...
+        # Другие проверки...
         if grep "ADD" Dockerfile > /dev/null 2>&1; then
           echo "[!] **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
           ISSUE_COUNT=$((ISSUE_COUNT + 1))
@@ -261,7 +273,7 @@ jobs:
         # ВАЖНО: Проверка результатов сборки - всегда добавляем в отчет
         if [ "$BUILD_SUCCESS" = "false" ]; then
           echo "" >> analysis-results.md
-          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "### Docker Build Results:" >> analysis-results.md
           echo "[!!] **CRITICAL**: Docker image failed to build!" >> analysis-results.md
           if [ -f build-results.json ]; then
             if jq -e . build-results.json > /dev/null 2>&1; then
@@ -284,7 +296,7 @@ jobs:
           CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
         else
           echo "" >> analysis-results.md
-          echo "### 🛠 Docker Build Results:" >> analysis-results.md
+          echo "### Docker Build Results:" >> analysis-results.md
           echo "[v] Docker image built successfully" >> analysis-results.md
         fi
         
@@ -292,7 +304,7 @@ jobs:
         HADOLINT_COUNT=0
         if [ -f hadolint-results.json ]; then
           echo "" >> analysis-results.md
-          echo "### 🐳 Hadolint Results:" >> analysis-results.md
+          echo "### Hadolint Results:" >> analysis-results.md
           
           if jq -e . hadolint-results.json > /dev/null 2>&1; then
             HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
@@ -308,9 +320,9 @@ jobs:
         
         # Анализ Trivy результатов
         TRIVY_COUNT=0
-        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "true" ]; then
+        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ]; then
           echo "" >> analysis-results.md
-          echo "### 🔍 Trivy Vulnerability Scan:" >> analysis-results.md
+          echo "### Trivy Vulnerability Scan:" >> analysis-results.md
           
           if jq -e . trivy-results.json > /dev/null 2>&1; then
             TRIVY_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' trivy-results.json 2>/dev/null || echo "0")
@@ -323,10 +335,6 @@ jobs:
           else
             echo "• Invalid Trivy JSON format" >> analysis-results.md
           fi
-        elif [ "$BUILD_SUCCESS" = "true" ] && [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
-          echo "" >> analysis-results.md
-          echo "### Trivy Vulnerability Scan:" >> analysis-results.md
-          echo "**SKIPPED**: Trivy scan skipped - no .dockerignore file" >> analysis-results.md
         elif [ "$BUILD_SUCCESS" = "false" ]; then
           echo "" >> analysis-results.md
           echo "### Trivy Vulnerability Scan:" >> analysis-results.md
@@ -347,15 +355,46 @@ jobs:
         echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
         
         exit 0
+
+    # ========== ARTIFACT PUBLISHING STAGE ==========
+    - name: Save Docker image as artifact
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "Saving Docker image as artifact..."
+        docker save test-image:latest -o test-image.tar
+        gzip test-image.tar
+
+    - name: Upload Docker image artifact
+      if: steps.build.outputs.build_success == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image-${{ github.sha }}
+        path: test-image.tar.gz
+        retention-days: 30
         
     - name: Upload SBOM artifact
       if: steps.build.outputs.build_success == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: sbom-cyclonedx
-        path: sbom.cyclonedx.json
+        name: sbom-cyclonedx-${{ github.sha }}
+        path: |
+          sbom.cyclonedx.json
+          sbom-scan-results.json
+          sbom-vulnerabilities.txt
         retention-days: 90
         
+    - name: Upload scan reports artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports-${{ github.sha }}
+        path: |
+          analysis-results.md
+          hadolint-results.json
+          trivy-results.json
+          build-results.json
+        retention-days: 90
+
+    # ========== NOTIFICATION STAGE ==========
     - name: Create or Update Issue
       uses: actions/github-script@v6
       if: steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false'
@@ -377,9 +416,9 @@ jobs:
           
           let title;
           if (buildSuccess === 'false') {
-            title = `[!!] Docker Build Failed: ${issueCount} additional problems found`;
+            title = `Docker Build Failed: ${issueCount} additional problems found`;
           } else {
-            title = `[!!] Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
+            title = `Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
           }
           
           // Читаем JSON файлы с результатами
@@ -549,7 +588,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: existingIssue.number,
-              body: `[v] Все проблемы в Dockerfile исправлены в коммите ${context.sha}\n SBOM анализ показал чистые результаты`
+              body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
             });
             
             console.log(`Closed issue #${existingIssue.number}`);
@@ -558,9 +597,9 @@ jobs:
     - name: Fail if critical issues found
       if: steps.analysis.outputs.critical_count > 0
       run: |
-        echo "[x] Найдены критические проблемы в Dockerfile: ${{ steps.analysis.outputs.critical_count }}"
-        echo "Пожалуйста, исправьте их перед мерджем"
-        echo "Подробности в созданном Issue"
+        echo "Found critical issues in Dockerfile: ${{ steps.analysis.outputs.critical_count }}"
+        echo "Please fix them before merging"
+        echo "Details in the created Issue"
         exit 1
         
     - name: Post PR comment
@@ -584,9 +623,9 @@ jobs:
           
           let commentTitle;
           if (buildSuccess === 'false') {
-            commentTitle = '## 🔍 Dockerfile Security Scan - BUILD FAILED';
+            commentTitle = '## Dockerfile Security Scan - BUILD FAILED';
           } else {
-            commentTitle = '## 🔍 Dockerfile Security Scan';
+            commentTitle = '## Dockerfile Security Scan';
           }
           
           const sbomInfo = buildSuccess === 'true' ? `
@@ -602,7 +641,7 @@ jobs:
           
           ${sbomInfo}
           
-          *Проверка выполнена автоматически*`;
+          *Automated security scan*`;
           
           await github.rest.issues.createComment({
             owner: context.repo.owner,
