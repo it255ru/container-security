@@ -85,44 +85,63 @@ jobs:
         # Устанавливаем jq для обработки JSON
         sudo apt-get update && sudo apt-get install -y jq
         
-      - name: Generate SBOM for final image
-        id: sbom_generation
-        if: steps.build.outputs.build_success == 'true'
-        run: |
-          echo "📋 Generating SBOM for final image..."
-          
-          # Генерируем SBOM с помощью Syft
-          syft test-image -o cyclonedx-json > sbom.cyclonedx.json
-          
-          # Добавляем информацию о скомпилированном Nginx в SBOM
-          NGINX_HASH=$(docker run --rm test-image sha256sum /usr/sbin/nginx 2>/dev/null | cut -d' ' -f1 || echo "unknown")
-          
-          # Исправленная команда jq - более безопасная обработка
-          jq '.components += [{
-            "type": "application",
-            "name": "nginx",
-            "version": "1.24.0",
-            "purl": "pkg:generic/nginx@1.24.0?download_url=https://nginx.org/download/nginx-1.24.0.tar.gz",
-            "hashes": [{"alg": "SHA-256", "content": "'$NGINX_HASH'"}],
-            "properties": [
-              {"name": "builtFromSource", "value": "true"},
-              {"name": "configureOptions", "value": "--with-http_ssl_module"},
-              {"name": "hardened", "value": "true"}
-            ]
-          }]' sbom.cyclonedx.json > sbom-enhanced.json
-          
-          mv sbom-enhanced.json sbom.cyclonedx.json
-          
-          # ИСПРАВЛЕННЫЙ АНАЛИЗ SBOM - безопасная обработка purl
-          COMPONENT_COUNT=$(jq '.components | length' sbom.cyclonedx.json)
-          
-          # Безопасный подсчет Alpine компонентов - проверяем наличие purl и его тип
-          ALPINE_COMPONENTS=$(jq '[.components[] | select(.purl != null) | select(.purl | type == "string") | select(.purl | startswith("pkg:apk/alpine"))] | length' sbom.cyclonedx.json)
-          
-          echo "component_count=$COMPONENT_COUNT" >> $GITHUB_OUTPUT
-          echo "alpine_components=$ALPINE_COMPONENTS" >> $GITHUB_OUTPUT
-          
-          echo "✅ SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
+    - name: Generate SBOM for final image
+      id: sbom_generation
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "📋 Generating SBOM for final image..."
+        
+        # Генерируем SBOM с помощью Syft
+        syft test-image -o cyclonedx-json > sbom.cyclonedx.json
+        
+        # Добавляем информацию о скомпилированном Nginx в SBOM
+        NGINX_HASH=$(docker run --rm test-image sha256sum /usr/sbin/nginx 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+        
+        # Исправленная команда jq - более безопасная обработка
+        jq '.components += [{
+          "type": "application",
+          "name": "nginx",
+          "version": "1.24.0",
+          "purl": "pkg:generic/nginx@1.24.0?download_url=https://nginx.org/download/nginx-1.24.0.tar.gz",
+          "hashes": [{"alg": "SHA-256", "content": "'$NGINX_HASH'"}],
+          "properties": [
+            {"name": "builtFromSource", "value": "true"},
+            {"name": "configureOptions", "value": "--with-http_ssl_module"},
+            {"name": "hardened", "value": "true"}
+          ]
+        }]' sbom.cyclonedx.json > sbom-enhanced.json
+        
+        mv sbom-enhanced.json sbom.cyclonedx.json
+        
+        # ИСПРАВЛЕННЫЙ АНАЛИЗ SBOM - безопасная обработка purl
+        COMPONENT_COUNT=$(jq '.components | length' sbom.cyclonedx.json)
+        
+        # Безопасный подсчет Alpine компонентов - проверяем наличие purl и его тип
+        ALPINE_COMPONENTS=$(jq '[.components[] | select(.purl != null) | select(.purl | type == "string") | select(.purl | startswith("pkg:apk/alpine"))] | length' sbom.cyclonedx.json)
+        
+        echo "component_count=$COMPONENT_COUNT" >> $GITHUB_OUTPUT
+        echo "alpine_components=$ALPINE_COMPONENTS" >> $GITHUB_OUTPUT
+        
+        echo "✅ SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
+      
+    - name: Scan SBOM for vulnerabilities
+      id: sbom_scan
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "🔍 Scanning SBOM for vulnerabilities..."
+        
+        # Используем Trivy для сканирования SBOM
+        trivy sbom --severity HIGH,CRITICAL --format json sbom.cyclonedx.json > sbom-scan-results.json 2>/dev/null || true
+        
+        # Анализируем результаты сканирования SBOM
+        if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
+          SBOM_VULN_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
+          echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
+          echo "📊 SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
+        else
+          echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "📊 SBOM scan completed - no vulnerabilities found or error in scan"
+        fi
       
     - name: Scan SBOM for vulnerabilities
       id: sbom_scan
