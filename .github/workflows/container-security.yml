@@ -421,110 +421,141 @@ jobs:
             title = `Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
           }
           
-          // Читаем JSON файлы с результатами
-          let buildResultsJson = '';
-          let hadolintResultsJson = '';
-          let trivyResultsJson = '';
-          let sbomJson = '';
-          let sbomScanResultsJson = '';
-          
-          try {
-            if (fs.existsSync('build-results.json')) {
-              buildResultsJson = fs.readFileSync('build-results.json', 'utf8');
-              buildResultsJson = JSON.stringify(JSON.parse(buildResultsJson), null, 2);
+          // Функция для безопасного чтения и обрезки JSON
+          const safeReadJson = (filename, maxLength = 5000) => {
+            try {
+              if (fs.existsSync(filename)) {
+                const content = fs.readFileSync(filename, 'utf8');
+                // Обрезаем длинные JSON файлы
+                if (content.length > maxLength) {
+                  return content.substring(0, maxLength) + `\n\n... [FILE TRUNCATED - ${content.length - maxLength} more characters] ...\n\nDownload full file from artifacts.`;
+                }
+                return content;
+              }
+            } catch (e) {
+              return `Error reading ${filename}: ${e.message}`;
             }
-          } catch (e) {
-            buildResultsJson = 'Error parsing build results JSON: ' + e.message;
-          }
+            return `File ${filename} not found`;
+          };
           
-          try {
-            if (fs.existsSync('hadolint-results.json')) {
-              hadolintResultsJson = fs.readFileSync('hadolint-results.json', 'utf8');
-              hadolintResultsJson = JSON.stringify(JSON.parse(hadolintResultsJson), null, 2);
+          // Функция для анализа SBOM уязвимостей
+          const analyzeSbomVulnerabilities = () => {
+            try {
+              if (fs.existsSync('sbom-scan-results.json')) {
+                const sbomScan = JSON.parse(fs.readFileSync('sbom-scan-results.json', 'utf8'));
+                const matches = sbomScan.matches || [];
+                
+                if (matches.length === 0) {
+                  return "No vulnerabilities found in SBOM";
+                }
+                
+                // Группируем по severity
+                const bySeverity = {};
+                matches.forEach(match => {
+                  const severity = match.vulnerability?.severity || 'unknown';
+                  bySeverity[severity] = (bySeverity[severity] || 0) + 1;
+                });
+                
+                let summary = `Found ${matches.length} vulnerabilities:\n`;
+                Object.entries(bySeverity).forEach(([severity, count]) => {
+                  summary += `- ${severity.toUpperCase()}: ${count}\n`;
+                });
+                
+                // Показываем только топ-5 уязвимостей
+                const topVulns = matches.slice(0, 5).map(match => {
+                  const vuln = match.vulnerability || {};
+                  return `• ${vuln.id || 'Unknown'}: ${vuln.description ? vuln.description.substring(0, 100) + '...' : 'No description'} (${vuln.severity || 'unknown'})`;
+                }).join('\n');
+                
+                if (matches.length > 5) {
+                  summary += `\nTop 5 vulnerabilities:\n${topVulns}\n... and ${matches.length - 5} more`;
+                } else {
+                  summary += `\nVulnerabilities:\n${topVulns}`;
+                }
+                
+                return summary;
+              }
+            } catch (e) {
+              return `Error analyzing SBOM vulnerabilities: ${e.message}`;
             }
-          } catch (e) {
-            hadolintResultsJson = 'Error parsing Hadolint results JSON: ' + e.message;
-          }
+            return "No SBOM vulnerability data available";
+          };
           
-          try {
-            if (fs.existsSync('trivy-results.json')) {
-              trivyResultsJson = fs.readFileSync('trivy-results.json', 'utf8');
-              trivyResultsJson = JSON.stringify(JSON.parse(trivyResultsJson), null, 2);
+          // Функция для анализа Trivy результатов
+          const analyzeTrivyResults = () => {
+            try {
+              if (fs.existsSync('trivy-results.json')) {
+                const trivy = JSON.parse(fs.readFileSync('trivy-results.json', 'utf8'));
+                const vulnerabilities = trivy.Results?.[0]?.Vulnerabilities || [];
+                
+                if (vulnerabilities.length === 0) {
+                  return "No vulnerabilities found by Trivy";
+                }
+                
+                // Группируем по severity
+                const bySeverity = {};
+                vulnerabilities.forEach(vuln => {
+                  const severity = vuln.Severity || 'unknown';
+                  bySeverity[severity] = (bySeverity[severity] || 0) + 1;
+                });
+                
+                let summary = `Found ${vulnerabilities.length} vulnerabilities:\n`;
+                Object.entries(bySeverity).forEach(([severity, count]) => {
+                  summary += `- ${severity}: ${count}\n`;
+                });
+                
+                // Показываем только топ-3 уязвимостей
+                const topVulns = vulnerabilities.slice(0, 3).map(vuln => {
+                  return `• ${vuln.VulnerabilityID}: ${vuln.Title ? vuln.Title.substring(0, 80) + '...' : 'No title'} (${vuln.Severity || 'unknown'})`;
+                }).join('\n');
+                
+                if (vulnerabilities.length > 3) {
+                  summary += `\nTop 3 vulnerabilities:\n${topVulns}\n... and ${vulnerabilities.length - 3} more`;
+                } else {
+                  summary += `\nVulnerabilities:\n${topVulns}`;
+                }
+                
+                return summary;
+              }
+            } catch (e) {
+              return `Error analyzing Trivy results: ${e.message}`;
             }
-          } catch (e) {
-            trivyResultsJson = 'Error parsing Trivy results JSON: ' + e.message;
-          }
+            return "No Trivy results available";
+          };
           
-          try {
-            if (fs.existsSync('sbom.cyclonedx.json')) {
-              sbomJson = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
-              sbomJson = JSON.stringify(JSON.parse(sbomJson), null, 2);
-            }
-          } catch (e) {
-            sbomJson = 'Error parsing SBOM JSON: ' + e.message;
-          }
+          // Создаем компактный отчет
+          const sbomVulnAnalysis = analyzeSbomVulnerabilities();
+          const trivyAnalysis = analyzeTrivyResults();
           
-          try {
-            if (fs.existsSync('sbom-scan-results.json')) {
-              sbomScanResultsJson = fs.readFileSync('sbom-scan-results.json', 'utf8');
-              sbomScanResultsJson = JSON.stringify(JSON.parse(sbomScanResultsJson), null, 2);
-            }
-          } catch (e) {
-            sbomScanResultsJson = 'Error parsing SBOM scan results JSON: ' + e.message;
-          }
-          
-          // Создаем детальный отчет с JSON данными
           const detailedReport = `${report}
           
-          ## Full Scan Results (JSON)
-          
-          <details>
-          <summary>Docker Build Results (JSON)</summary>
-          
-          \`\`\`json
-          ${buildResultsJson || 'No build results available'}
-          \`\`\`
-          </details>
-          
-          <details>
-          <summary>Hadolint Results (JSON)</summary>
-          
-          \`\`\`json
-          ${hadolintResultsJson || 'No Hadolint results available'}
-          \`\`\`
-          </details>
-          
-          <details>
-          <summary>Trivy Vulnerability Scan Results (JSON)</summary>
-          
-          \`\`\`json
-          ${trivyResultsJson || 'No Trivy results available'}
-          \`\`\`
-          </details>
-          
-          ${buildSuccess === 'true' ? `
-          <details>
-          <summary>SBOM Analysis Results (JSON)</summary>
-          
-          **SBOM Components:** ${sbomComponentCount} total, ${sbomAlpineComponents} Alpine packages
-          
-          \`\`\`json
-          ${sbomJson || 'No SBOM available'}
-          \`\`\`
-          </details>
-          
-          <details>
-          <summary>SBOM Vulnerability Scan Results (JSON)</summary>
-          
-          \`\`\`json
-          ${sbomScanResultsJson || 'No SBOM scan results available'}
-          \`\`\`
-          </details>
-          ` : ''}
-          
-          ---
-          *Автоматически создано workflow [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
-          `;
+    ## Vulnerability Analysis
+    
+    ### SBOM Vulnerabilities:
+    ${sbomVulnAnalysis}
+    
+    ### Trivy Image Scan:
+    ${trivyAnalysis}
+    
+    ## Artifacts
+    
+    Полные результаты доступны в артефактах workflow:
+    
+    - **Docker Image**: \`docker-image-${{ github.sha }}\`
+    - **SBOM Files**: \`sbom-cyclonedx-${{ github.sha }}\` 
+    - **Security Reports**: \`security-reports-${{ github.sha }}\`
+    
+    [📎 View all artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+    
+    ## Quick Links
+    
+    - [View Workflow Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+    - [View Source Code](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/tree/${context.sha})
+    
+    ---
+    
+    *Automatically generated by [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+    `;
           
           // Ищем существующий issue
           const { data: issues } = await github.rest.issues.listForRepo({
