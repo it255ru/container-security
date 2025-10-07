@@ -1,176 +1,113 @@
-# 🔒 Hardened Nginx Docker Image
+# Hardened Nginx Docker Image
 
 (RU) Hardened образ Nginx, собранный из исходного кода с фокусом на безопасность и минимализм.
-
 (EN) A security-hardened Nginx container built from source with minimal attack surface.
 
-## 🛡️ Security Features
+## Dockerfile Security Scan with SBOM
 
-- **Non-root execution**: Runs as `nginx` user (UID 1000)
-- **Minimal modules**: Compiled with only `--with-http_ssl_module`
-- **Source compilation**: Nginx 1.24.0 built from source code
-- **Alpine base**: Alpine Linux 3.20.0 for minimal footprint
-- **Hardened config**: Server tokens disabled, non-privileged port
+GitHub Actions workflow для автоматического сканирования безопасности Docker образов с генерацией Software Bill of Materials (SBOM).
 
-## 🔧 Особенности безопасности
+## Назначение
 
-### 🔍 Principle of Least Privilege
-- **Non-root execution**: Запуск от пользователя `nginx` (UID: 1000)
-- **Minimal capabilities**: Только `NET_BIND_SERVICE` для порта 8080
-- **File permissions**: Strict ownership и access controls
+Этот workflow автоматически анализирует Dockerfile и собранные образы на предмет:
+- **Уязвимостей безопасности** в базовых образах и зависимостях
+- **Best practices** для Dockerfile
+- **Лицензионной совместимости** компонентов
+- **Составления SBOM** (Software Bill of Materials) для полной прозрачности
 
-### 🛡️ Attack Surface Reduction
-- **Минимальные модули**: Только SSL, без rewrite/gzip
-- **No shell access**: Контейнер не предоставляет shell по умолчанию
-- **Read-only roots**: Возможность запуска с `--read-only`
+## Быстрый старт
 
-### 📝 Secure Configuration
-```nginx
-server_tokens off;          # Скрытие версии Nginx
-listen 8080;                # Непривилегированный порт
-user nginx;                 # Non-root пользователь
-```
+1. **Добавьте workflow** в ваш репозиторий в `.github/workflows/docker-security.yml`
+2. **Настройте триггеры** под ваши нужды
+3. **Убедитесь что Dockerfile** находится в корне репозитория
+4. **Запустите workflow** - результаты появятся в Issues
 
-## 📁 Project Structure
+## Просмотр результатов
 
-```
-Dockerfile              # Multi-stage build
-nginx-minimal.conf      # Hardened Nginx config  
-html/
-└── index.html          # Static content
-```
+После выполнения workflow проверьте:
+1. **Issues** - основные проблемы и сводка
+2. **Actions artifacts** - полные отчеты и SBOM
+3. **PR comments** - результаты проверки для code review
 
-**Image Size**: ~20MB  
-**Status**: Production Ready
+## Конфигурация
 
-## 🚀 Production Workflow
+Workflow не требует дополнительной конфигурации, но можно настроить:
+- Уровни серьезности для проверки
+- Форматы отчетов
+- Правила линтинга Hadolint
+- Политики fail-on для разных типов проблем
 
-### 1. Локальная разработка
-```bash
-# Сборка и тестирование
-docker build -t hardened-nginx .
-docker run -p 8080:8080 --rm hardened-nginx
-```
+## Триггеры запуска
 
-### 2. CI/CD Pipeline
-```yaml
-# Пример GitHub Actions
-- name: Build Hardened Image
-  run: |
-    docker build -t ${{ secrets.REGISTRY }}/nginx:hardened .
-    docker scan ${{ secrets.REGISTRY }}/nginx:hardened
-```
+Workflow автоматически запускается при:
+- Push в ветку `main`
+- Создании Pull Request в ветку `main`
+- Ручном запуске из раздела Actions
 
-### 3. Production Deployment
-```bash
-# Безопасный запуск в production
-docker run -d \
-  --security-opt=no-new-privileges \
-  --cap-drop=ALL \
-  --cap-add=NET_BIND_SERVICE \
-  --read-only \
-  -v /tmp/nginx:/tmp \
-  -p 8080:8080 \
-  hardened-nginx
-```
+## Основные этапы анализа
 
-## 📊 Security Benchmarks
+### 1. **Статический анализ Dockerfile**
+- **Hadolint** - линтер для проверки best practices
+- **Кастомные проверки** - non-root пользователь, безопасные инструкции
 
-### Компоненты образа
-| Компонент | Версия | Статус безопасности |
-|-----------|---------|---------------------|
-| Alpine Linux | 3.20.0 | ✅ Regular updates |
-| Nginx | 1.24.0 | ✅ Compiled from source |
-| OpenSSL | 3.x | ✅ Latest security patches |
+### 2. **Сборка образа**
+- Попытка сборки Docker образа
+- Проверка наличия `.dockerignore`
+- Создание тегов с SHA коммита
 
-### Security Features
-- [x] **No shell** в runtime образе
-- [x] **Static compilation** бинарных файлов
-- [x] **Minimal package set** в runtime
-- [x] **Regular vulnerability scanning**
+### 3. **Генерация SBOM**
+- **Syft** - создание полного списка компонентов в формате CycloneDX
+- Анализ всех пакетов Alpine Linux и их зависимостей
+- Добавление кастомной информации о скомпилированных компонентах
 
-## 🔍 Мониторинг и аудит
+### 4. **Сканирование уязвимостей**
+- **Trivy** - сканирование собранного образа на CVE
+- **Grype** - сканирование SBOM на уязвимости
+- Фокус на HIGH и CRITICAL уязвимостях
 
-### Логирование
-```bash
-# Стандартные потоки для логов
-docker logs hardened-nginx-container
-```
+### 5. **Создание отчетов**
+- Детальный анализ в формате Markdown
+- Автоматическое создание/обновление Issue
+- Прикрепление полных отчетов как комментариев к Issue
+- Сохранение артефактов (SBOM, образы, логи)
 
-### Health checks
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD curl -f http://localhost:8080/ || exit 1
-```
+## Результаты работы
 
-### Security scanning
-```bash
-# Trivy vulnerability scan
-trivy image hardened-nginx
+### Создаваемые артефакты:
+- `sbom-cyclonedx-{sha}` - SBOM в формате CycloneDX
+- `docker-image-{sha}` - Собранный Docker образ
+- `security-reports-{sha}` - Полные отчеты сканирования
 
-# Docker Scout analysis
-docker scout quickview hardened-nginx
-```
+### Автоматические уведомления:
+- **Issue** создается при обнаружении проблем
+- **Комментарии в PR** при проверке pull request
+- **Вложения в Issue** с полными отчетами (SBOM, результаты сканирований)
 
-## 🛠️ Использование в инфраструктуре
+## Используемые инструменты
 
-### Как базовый образ
-```dockerfile
-FROM your-registry/hardened-nginx:latest
-COPY your-app /var/www/html
-# Наследует все security features
-```
+| Инструмент | Назначение |
+|------------|------------|
+| **Hadolint** | Линтинг Dockerfile |
+| **Syft** | Генерация SBOM |
+| **Trivy** | Сканирование образов на уязвимости |
+| **Grype** | Сканирование SBOM на уязвимости |
+| **Docker Buildx** | Сборка образов |
 
-### В Kubernetes
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-  containers:
-  - name: nginx
-    image: hardened-nginx
-    ports:
-    - containerPort: 8080
-```
+## Мониторинг и отчетность
 
-## 📈 Production Readiness
+### Уровни серьезности проблем:
+- **CRITICAL** - Критические проблемы безопасности
+- **HIGH** - Высокорисковые уязвимости  
+- **WARNING** - Нарушения best practices
 
-### Проверки перед развертыванием
-- [ ] Security scan пройден
-- [ ] Configuration validation успешен
-- [ ] Performance testing завершен
-- [ ] Rollback plan подготовлен
+### Примеры обнаруживаемых проблем:
+- Использование root пользователя
+- Устаревшие базовые образы
+- Известные CVE в зависимостях
+- Небезопасные инструкции (curl | bash)
+- Отсутствие .dockerignore
 
-### Рекомендуемые лимиты
-```yaml
-resources:
-  limits:
-    memory: "128Mi"
-    cpu: "500m"
-  requests:
-    memory: "64Mi"
-    cpu: "100m"
-```
-
-## 🔗 Интеграции
-
-### Security Tools
-- **Trivy**: Vulnerability scanning
-- **Falco**: Runtime security monitoring
-- **OPA**: Policy enforcement
-
-### CI/CD Pipeline
-- **GitHub Actions**: Automated builds
-- **Docker Scout**: Image analysis
-- **SLSA**: Supply chain security
 
 ---
 
-**Статус**: Production Ready  
-**Security Level**: Hardened  
-**Maintenance**: Active security updates  
-
-> ⚠️ **Важно**: Этот образ предназначен для security-critical окружений. Все изменения проходят security review перед мержем в main ветку.
+*Автоматизированная система безопасности контейнеров | [Подробнее о SBOM](https://cyclonedx.org/)*
