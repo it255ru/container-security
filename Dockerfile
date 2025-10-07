@@ -1,14 +1,14 @@
-# Используем более свежий Alpine чтобы получить обновленный OpenSSL
+# Используем Alpine 3.21.0 который содержит OpenSSL 3.3.5
 FROM alpine:3.21.0 AS builder
 
 WORKDIR /tmp
 
-# Обновляем apk index и устанавливаем пакеты с явным указанием версий
+# Устанавливаем пакеты без явных версий - используем те что есть в репозитории
 RUN apk update && apk add --no-cache \
     build-base \
     pcre-dev \
     zlib-dev \
-    openssl-dev=3.3.5-r0 \
+    openssl-dev \
     wget \
     tar
 
@@ -21,23 +21,23 @@ RUN ./configure \
     --prefix=/etc/nginx \
     --sbin-path=/usr/sbin/nginx \
     --conf-path=/etc/nginx/nginx.conf \
-    --error-log-path=/tmp/error.log \
-    --http-log-path=/tmp/access.log \
-    --pid-path=/tmp/nginx.pid \
+    --error-log-path=/var/log/nginx/error.log \
+    --http-log-path=/var/log/nginx/access.log \
+    --pid-path=/var/run/nginx.pid \
     --user=nginx \
     --group=nginx \
     --with-http_ssl_module && \
     make -j"$(nproc)" && \
     make install
 
-# Используем тот же Alpine 3.21.0 в runtime для консистентности
+# Runtime этап
 FROM alpine:3.21.0
 
-# Явно указываем версии пакетов чтобы избежать уязвимостей
+# Устанавливаем только необходимые пакеты - Alpine 3.21.0 уже содержит исправленные версии
 RUN apk add --no-cache \
-    pcre=8.45-r5 \
-    zlib=1.3.1-r2 \
-    openssl=3.3.5-r0 && \
+    pcre \
+    zlib \
+    openssl && \
     addgroup -S nginx && \
     adduser -S -D -H -G nginx nginx && \
     mkdir -p /var/log/nginx /var/www/html /var/run
