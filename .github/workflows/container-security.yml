@@ -395,7 +395,7 @@ jobs:
         retention-days: 90
 
     # ========== NOTIFICATION STAGE ==========
-    - name: Create or Update Issue
+    - name: Create or Update Issue with Attachments
       uses: actions/github-script@v6
       if: steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false'
       env:
@@ -421,135 +421,77 @@ jobs:
             title = `Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
           }
           
-          // Функция для безопасного чтения и обрезки JSON
-          const safeReadJson = (filename, maxLength = 5000) => {
-            try {
-              if (fs.existsSync(filename)) {
-                const content = fs.readFileSync(filename, 'utf8');
-                // Обрезаем длинные JSON файлы
-                if (content.length > maxLength) {
-                  return content.substring(0, maxLength) + `\n\n... [FILE TRUNCATED - ${content.length - maxLength} more characters] ...\n\nDownload full file from artifacts.`;
-                }
-                return content;
-              }
-            } catch (e) {
-              return `Error reading ${filename}: ${e.message}`;
-            }
-            return `File ${filename} not found`;
-          };
-          
-          // Функция для анализа SBOM уязвимостей
-          const analyzeSbomVulnerabilities = () => {
+          // Функция для анализа уязвимостей
+          const analyzeVulnerabilities = () => {
+            let summary = '';
+            
+            // Анализ SBOM уязвимостей
             try {
               if (fs.existsSync('sbom-scan-results.json')) {
                 const sbomScan = JSON.parse(fs.readFileSync('sbom-scan-results.json', 'utf8'));
                 const matches = sbomScan.matches || [];
                 
-                if (matches.length === 0) {
-                  return "No vulnerabilities found in SBOM";
+                if (matches.length > 0) {
+                  const bySeverity = {};
+                  matches.forEach(match => {
+                    const severity = match.vulnerability?.severity || 'unknown';
+                    bySeverity[severity] = (bySeverity[severity] || 0) + 1;
+                  });
+                  
+                  summary += `**SBOM Vulnerabilities:** ${matches.length} found\n`;
+                  Object.entries(bySeverity).forEach(([severity, count]) => {
+                    summary += `- ${severity.toUpperCase()}: ${count}\n`;
+                  });
                 }
-                
-                // Группируем по severity
-                const bySeverity = {};
-                matches.forEach(match => {
-                  const severity = match.vulnerability?.severity || 'unknown';
-                  bySeverity[severity] = (bySeverity[severity] || 0) + 1;
-                });
-                
-                let summary = `Found ${matches.length} vulnerabilities:\n`;
-                Object.entries(bySeverity).forEach(([severity, count]) => {
-                  summary += `- ${severity.toUpperCase()}: ${count}\n`;
-                });
-                
-                // Показываем только топ-5 уязвимостей
-                const topVulns = matches.slice(0, 5).map(match => {
-                  const vuln = match.vulnerability || {};
-                  return `• ${vuln.id || 'Unknown'}: ${vuln.description ? vuln.description.substring(0, 100) + '...' : 'No description'} (${vuln.severity || 'unknown'})`;
-                }).join('\n');
-                
-                if (matches.length > 5) {
-                  summary += `\nTop 5 vulnerabilities:\n${topVulns}\n... and ${matches.length - 5} more`;
-                } else {
-                  summary += `\nVulnerabilities:\n${topVulns}`;
-                }
-                
-                return summary;
               }
             } catch (e) {
-              return `Error analyzing SBOM vulnerabilities: ${e.message}`;
+              summary += `**SBOM Vulnerabilities:** Error analyzing\n`;
             }
-            return "No SBOM vulnerability data available";
-          };
-          
-          // Функция для анализа Trivy результатов
-          const analyzeTrivyResults = () => {
+            
+            // Анализ Trivy уязвимостей
             try {
               if (fs.existsSync('trivy-results.json')) {
                 const trivy = JSON.parse(fs.readFileSync('trivy-results.json', 'utf8'));
                 const vulnerabilities = trivy.Results?.[0]?.Vulnerabilities || [];
                 
-                if (vulnerabilities.length === 0) {
-                  return "No vulnerabilities found by Trivy";
+                if (vulnerabilities.length > 0) {
+                  const bySeverity = {};
+                  vulnerabilities.forEach(vuln => {
+                    const severity = vuln.Severity || 'unknown';
+                    bySeverity[severity] = (bySeverity[severity] || 0) + 1;
+                  });
+                  
+                  summary += `\n**Trivy Vulnerabilities:** ${vulnerabilities.length} found\n`;
+                  Object.entries(bySeverity).forEach(([severity, count]) => {
+                    summary += `- ${severity}: ${count}\n`;
+                  });
                 }
-                
-                // Группируем по severity
-                const bySeverity = {};
-                vulnerabilities.forEach(vuln => {
-                  const severity = vuln.Severity || 'unknown';
-                  bySeverity[severity] = (bySeverity[severity] || 0) + 1;
-                });
-                
-                let summary = `Found ${vulnerabilities.length} vulnerabilities:\n`;
-                Object.entries(bySeverity).forEach(([severity, count]) => {
-                  summary += `- ${severity}: ${count}\n`;
-                });
-                
-                // Показываем только топ-3 уязвимостей
-                const topVulns = vulnerabilities.slice(0, 3).map(vuln => {
-                  return `• ${vuln.VulnerabilityID}: ${vuln.Title ? vuln.Title.substring(0, 80) + '...' : 'No title'} (${vuln.Severity || 'unknown'})`;
-                }).join('\n');
-                
-                if (vulnerabilities.length > 3) {
-                  summary += `\nTop 3 vulnerabilities:\n${topVulns}\n... and ${vulnerabilities.length - 3} more`;
-                } else {
-                  summary += `\nVulnerabilities:\n${topVulns}`;
-                }
-                
-                return summary;
               }
             } catch (e) {
-              return `Error analyzing Trivy results: ${e.message}`;
+              summary += `\n**Trivy Vulnerabilities:** Error analyzing\n`;
             }
-            return "No Trivy results available";
+            
+            return summary || 'No vulnerabilities found in scans';
           };
           
-          // Создаем компактный отчет
-          const sbomVulnAnalysis = analyzeSbomVulnerabilities();
-          const trivyAnalysis = analyzeTrivyResults();
+          // Создаем основной отчет
+          const mainReport = `${report}
           
-          const detailedReport = `${report}
-                
-          ## Vulnerability Analysis
+          ## Vulnerability Summary
           
-          ### SBOM Vulnerabilities:
-          ${sbomVulnAnalysis}
+          ${analyzeVulnerabilities()}
           
-          ### Trivy Image Scan:
-          ${trivyAnalysis}
+          ## Attached Reports
           
-          ## Artifacts
-          
-          Полные результаты доступны в артефактах workflow:
-          
-          - **Docker Image**: \`docker-image-${{ github.sha }}\`
-          - **SBOM Files**: \`sbom-cyclonedx-${{ github.sha }}\` 
-          - **Security Reports**: \`security-reports-${{ github.sha }}\`
-          
-          [📎 View all artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+          📎 **SBOM Analysis** - Full software bill of materials (CycloneDX format)
+          📎 **Vulnerability Scan** - Detailed security scan results  
+          📎 **Build Logs** - Complete Docker build information
+          📎 **Linter Results** - Hadolint Dockerfile analysis
           
           ## Quick Links
           
           - [View Workflow Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+          - [Download All Artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
           - [View Source Code](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/tree/${context.sha})
           
           ---
@@ -569,6 +511,8 @@ jobs:
                   issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
                 );
                 
+                let issueNumber;
+                
                 if (existingIssue) {
                   // Обновляем существующий issue
                   await github.rest.issues.update({
@@ -576,8 +520,9 @@ jobs:
                     repo: context.repo.repo,
                     issue_number: existingIssue.number,
                     title: title,
-                    body: detailedReport
+                    body: mainReport
                   });
+                  issueNumber = existingIssue.number;
                   console.log(`Updated existing issue #${existingIssue.number}`);
                 } else {
                   // Создаем новый issue
@@ -585,45 +530,155 @@ jobs:
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     title: title,
-                    body: detailedReport,
+                    body: mainReport,
                     labels: ['dockerfile-security', 'security', 'ci-cd']
                   });
+                  issueNumber = newIssue.number;
                   console.log(`Created new issue #${newIssue.number}`);
                 }
+                
+                // Теперь добавляем комментарии с вложениями
+                console.log('Adding attachments as comments...');
+                
+                // Функция для создания комментария с файлом
+                const createAttachmentComment = async (filename, title, content) => {
+                  try {
+                    // Ограничиваем размер для GitHub (65KB на комментарий)
+                    const maxSize = 60000;
+                    let fileContent = content;
+                    
+                    if (fileContent.length > maxSize) {
+                      fileContent = fileContent.substring(0, maxSize) + 
+                        `\n\n... [FILE TRUNCATED - ${content.length - maxSize} characters removed] ...\n` +
+                        'Download full file from workflow artifacts.';
+                    }
+                    
+                    const commentBody = `## ${title}
           
-    - name: Close existing issue if no problems
-      uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
-      with:
-        script: |
-          const { data: issues } = await github.rest.issues.listForRepo({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            state: 'open',
-            labels: ['dockerfile-security']
-          });
+          \`\`\`json
+          ${fileContent}
+          \`\`\`
           
-          const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
-          );
-          
-          if (existingIssue) {
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              state: 'closed'
-            });
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
-            });
-            
-            console.log(`Closed issue #${existingIssue.number}`);
-          }
+          *Attached from ${filename}*`;
+                    
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: issueNumber,
+                      body: commentBody
+                    });
+                    
+                    console.log(`✓ Added attachment: ${title}`);
+                  } catch (error) {
+                    console.log(`✗ Failed to add attachment ${title}: ${error.message}`);
+                  }
+                };
+                
+                // Добавляем SBOM как вложение
+                try {
+                  if (fs.existsSync('sbom.cyclonedx.json')) {
+                    const sbomContent = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
+                    await createAttachmentComment(
+                      'sbom.cyclonedx.json',
+                      'SBOM Analysis (CycloneDX)',
+                      sbomContent
+                    );
+                  }
+                } catch (e) {
+                  console.log('Failed to attach SBOM:', e.message);
+                }
+                
+                // Добавляем результаты сканирования уязвимостей
+                try {
+                  if (fs.existsSync('sbom-scan-results.json')) {
+                    const scanContent = fs.readFileSync('sbom-scan-results.json', 'utf8');
+                    await createAttachmentComment(
+                      'sbom-scan-results.json',
+                      'Vulnerability Scan Results',
+                      scanContent
+                    );
+                  }
+                } catch (e) {
+                  console.log('Failed to attach vulnerability scan results:', e.message);
+                }
+                
+                // Добавляем результаты Trivy
+                try {
+                  if (fs.existsSync('trivy-results.json')) {
+                    const trivyContent = fs.readFileSync('trivy-results.json', 'utf8');
+                    await createAttachmentComment(
+                      'trivy-results.json',
+                      'Trivy Security Scan',
+                      trivyContent
+                    );
+                  }
+                } catch (e) {
+                  console.log('Failed to attach Trivy results:', e.message);
+                }
+                
+                // Добавляем результаты Hadolint
+                try {
+                  if (fs.existsSync('hadolint-results.json')) {
+                    const hadolintContent = fs.readFileSync('hadolint-results.json', 'utf8');
+                    await createAttachmentComment(
+                      'hadolint-results.json',
+                      'Dockerfile Linter Results',
+                      hadolintContent
+                    );
+                  }
+                } catch (e) {
+                  console.log('Failed to attach Hadolint results:', e.message);
+                }
+                
+                // Добавляем результаты сборки
+                try {
+                  if (fs.existsSync('build-results.json')) {
+                    const buildContent = fs.readFileSync('build-results.json', 'utf8');
+                    await createAttachmentComment(
+                      'build-results.json',
+                      'Docker Build Results',
+                      buildContent
+                    );
+                  }
+                } catch (e) {
+                  console.log('Failed to attach build results:', e.message);
+                }
+                
+                console.log('All attachments added successfully');
+                
+          - name: Close existing issue if no problems
+            uses: actions/github-script@v6
+            if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
+            with:
+              script: |
+                const { data: issues } = await github.rest.issues.listForRepo({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  labels: ['dockerfile-security']
+                });
+                
+                const existingIssue = issues.find(issue => 
+                  issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
+                );
+                
+                if (existingIssue) {
+                  await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: existingIssue.number,
+                    state: 'closed'
+                  });
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: existingIssue.number,
+                    body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
+                  });
+                  
+                  console.log(`Closed issue #${existingIssue.number}`);
+                }
           
     - name: Fail if critical issues found
       if: steps.analysis.outputs.critical_count > 0
