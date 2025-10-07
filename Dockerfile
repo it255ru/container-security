@@ -1,4 +1,4 @@
-FROM alpine:3.20.0 AS builder
+FROM alpine:3.18.12 AS builder
 
 WORKDIR /tmp
 
