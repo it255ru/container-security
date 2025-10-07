@@ -1,11 +1,6 @@
-# Hardened Nginx Docker Image
+# Hardened Nginx Dockerfile. Security scan with SBOM
 
-(RU) Hardened образ Nginx, собранный из исходного кода с фокусом на безопасность и минимализм.
-(EN) A security-hardened Nginx container built from source with minimal attack surface.
-
-## Dockerfile Security Scan with SBOM
-
-GitHub Actions workflow для автоматического сканирования безопасности Docker образов с генерацией Software Bill of Materials (SBOM).
+GitHub Actions workflow для комплексного анализа безопасности hardened Docker образов Nginx с генерацией Software Bill of Materials (SBOM).
 
 ## Назначение
 
