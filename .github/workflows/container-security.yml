@@ -124,44 +124,7 @@ jobs:
         
         echo "✅ SBOM generated with $COMPONENT_COUNT components ($ALPINE_COMPONENTS Alpine packages)"
       
-    - name: Scan SBOM for vulnerabilities
-      id: sbom_scan
-      if: steps.build.outputs.build_success == 'true'
-      run: |
-        echo "🔍 Scanning SBOM for vulnerabilities..."
-        
-        # Используем Trivy для сканирования SBOM
-        trivy sbom --severity HIGH,CRITICAL --format json sbom.cyclonedx.json > sbom-scan-results.json 2>/dev/null || true
-        
-        # Анализируем результаты сканирования SBOM
-        if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
-          SBOM_VULN_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
-          echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
-          echo "📊 SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
-        else
-          echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
-          echo "📊 SBOM scan completed - no vulnerabilities found or error in scan"
-        fi
-      
-    - name: Scan SBOM for vulnerabilities
-      id: sbom_scan
-      if: steps.build.outputs.build_success == 'true'
-      run: |
-        echo "🔍 Scanning SBOM for vulnerabilities..."
-        
-        # Используем Trivy для сканирования SBOM
-        trivy sbom --severity HIGH,CRITICAL --format json sbom.cyclonedx.json > sbom-scan-results.json 2>/dev/null || true
-        
-        # Анализируем результаты сканирования SBOM
-        if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
-          SBOM_VULN_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
-          echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
-          echo "📊 SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
-        else
-          echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
-          echo "📊 SBOM scan completed - no vulnerabilities found or error in scan"
-        fi
-      
+    # ========== ИСПРАВЛЕНИЕ: УДАЛЕНЫ ДУБЛИРУЮЩИЕСЯ ШАГИ ==========
     - name: Scan SBOM for vulnerabilities
       id: sbom_scan
       if: steps.build.outputs.build_success == 'true'
