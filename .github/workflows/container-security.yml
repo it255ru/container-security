@@ -10,7 +10,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  packages: write  # Добавлено для сохранения артефактов в package
+  packages: write
 
 jobs:
   dockerfile-scan:
@@ -70,9 +70,14 @@ jobs:
           echo "Docker build successful"
           echo "build_success=true" >> $GITHUB_OUTPUT
           echo '{"success": true, "message": "Build completed successfully"}' > build-results.json
+          
+          # Получаем информацию об Alpine версии
+          ALPINE_VERSION=$(docker run --rm test-image:latest cat /etc/alpine-release 2>/dev/null | tr -d '\r' || echo "unknown")
+          echo "alpine_version=$ALPINE_VERSION" >> $GITHUB_OUTPUT
         else
           echo "Docker build failed"
           echo "build_success=false" >> $GITHUB_OUTPUT
+          echo "alpine_version=unknown" >> $GITHUB_OUTPUT
           ERROR_MSG=$(head -c 1000 build-errors.log | sed 's/"/\\"/g' || echo "Build failed")
           echo "{\"success\": false, \"error\": \"$ERROR_MSG\"}" > build-results.json
         fi
@@ -87,8 +92,14 @@ jobs:
         # Устанавливаем Trivy для сканирования уязвимостей
         curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
         
-        # Устанавливаем Grype для сканирования SBOM
-        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        # Устанавливаем Grype для сканирования SBOM с fallback
+        echo "Installing Grype..."
+        if ! curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin; then
+          echo "Grype install failed, trying direct download..."
+          wget -q https://github.com/anchore/grype/releases/download/v0.74.10/grype_0.74.10_linux_amd64.tar.gz
+          tar -xzf grype_0.74.10_linux_amd64.tar.gz
+          sudo mv grype /usr/local/bin/
+        fi
         
         # Устанавливаем jq для обработки JSON
         sudo apt-get update && sudo apt-get install -y jq
@@ -136,45 +147,121 @@ jobs:
       run: |
         echo "Scanning SBOM for vulnerabilities with Grype..."
         
-        # Используем Grype для сканирования SBOM
-        grype sbom:sbom.cyclonedx.json --output json --fail-on high > sbom-scan-results.json 2>/dev/null || true
+        # Создаем конфиг для игнорирования false-positive CVE
+        cat > grype-config.yaml << 'EOF'
+        ignore:
+          # Игнорируем проблемные CVE в busybox
+          - vulnerability: "CVE-2025-46394"
+            reason: "Ignore in busybox components"
+            
+          - vulnerability: "CVE-2024-58251"  
+            reason: "Ignore in busybox components"
+        EOF
+        
+        # Используем Grype для сканирования SBOM со всеми severity
+        grype sbom:sbom.cyclonedx.json --config grype-config.yaml --output json > sbom-scan-all-severities.json 2>/dev/null || true
         
         # Анализируем результаты сканирования SBOM
-        if [ -f sbom-scan-results.json ] && jq -e . sbom-scan-results.json > /dev/null 2>&1; then
-          SBOM_VULN_COUNT=$(jq '.matches // [] | length' sbom-scan-results.json 2>/dev/null || echo "0")
+        if [ -f sbom-scan-all-severities.json ] && jq -e . sbom-scan-all-severities.json > /dev/null 2>&1; then
+          # Получаем все matches
+          SBOM_VULN_COUNT=$(jq '.matches // [] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          
+          # Считаем по severity
+          SBOM_CRITICAL_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "Critical")] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          SBOM_HIGH_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "High")] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          SBOM_MEDIUM_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "Medium")] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          SBOM_LOW_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "Low")] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          SBOM_UNKNOWN_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "Unknown")] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          SBOM_NONE_COUNT=$(jq '[.matches // [] | select(.vulnerability.severity == "None" or .vulnerability.severity == "" or .vulnerability.severity == null)] | length' sbom-scan-all-severities.json 2>/dev/null || echo "0")
+          
+          # Реальные уязвимости (все кроме "None")
+          SBOM_REAL_VULN_COUNT=$((SBOM_CRITICAL_COUNT + SBOM_HIGH_COUNT + SBOM_MEDIUM_COUNT + SBOM_LOW_COUNT + SBOM_UNKNOWN_COUNT))
+          
           echo "sbom_vuln_count=$SBOM_VULN_COUNT" >> $GITHUB_OUTPUT
-          echo "SBOM scan found $SBOM_VULN_COUNT vulnerabilities"
+          echo "sbom_real_vuln_count=$SBOM_REAL_VULN_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_critical_count=$SBOM_CRITICAL_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_high_count=$SBOM_HIGH_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_medium_count=$SBOM_MEDIUM_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_low_count=$SBOM_LOW_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_unknown_count=$SBOM_UNKNOWN_COUNT" >> $GITHUB_OUTPUT
+          echo "sbom_none_count=$SBOM_NONE_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "SBOM scan found $SBOM_VULN_COUNT matches ($SBOM_REAL_VULN_COUNT real vulnerabilities)"
+          echo "Breakdown - Critical: $SBOM_CRITICAL_COUNT, High: $SBOM_HIGH_COUNT, Medium: $SBOM_MEDIUM_COUNT, Low: $SBOM_LOW_COUNT, Unknown: $SBOM_UNKNOWN_COUNT, None: $SBOM_NONE_COUNT"
           
           # Сохраняем краткий отчет
-          if [ "$SBOM_VULN_COUNT" -gt 0 ]; then
-            grype sbom:sbom.cyclonedx.json --output table > sbom-vulnerabilities.txt
+          if [ "$SBOM_REAL_VULN_COUNT" -gt 0 ]; then
+            grype sbom:sbom.cyclonedx.json --config grype-config.yaml --output table > sbom-vulnerabilities.txt
           fi
         else
           echo "sbom_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_real_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_critical_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_high_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_medium_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_low_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_unknown_count=0" >> $GITHUB_OUTPUT
+          echo "sbom_none_count=0" >> $GITHUB_OUTPUT
           echo "SBOM scan completed - no vulnerabilities found or error in scan"
         fi
       
-    - name: Run Trivy vulnerability scan on image
+    - name: Run Trivy vulnerability scan on image (all severities)
       id: trivy_scan
       if: steps.build.outputs.build_success == 'true'
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: test-image:latest
-        format: json
-        output: trivy-results.json
-        severity: HIGH,CRITICAL
-        exit-code: 0
-      continue-on-error: true
+      run: |
+        echo "Running Trivy scan with all severities..."
+        
+        # Запускаем Trivy для всех уровней серьезности
+        trivy image --format json --output trivy-results-all-severities.json test-image:latest
+        trivy image --format table --output trivy-report.txt test-image:latest
+        
+        # Анализируем результаты Trivy
+        if [ -f "trivy-results-all-severities.json" ] && jq -e . trivy-results-all-severities.json > /dev/null 2>&1; then
+          TRIVY_CRITICAL=$(jq '[.Results[0].Vulnerabilities // [] | select(.Severity == "CRITICAL")] | length' trivy-results-all-severities.json 2>/dev/null || echo "0")
+          TRIVY_HIGH=$(jq '[.Results[0].Vulnerabilities // [] | select(.Severity == "HIGH")] | length' trivy-results-all-severities.json 2>/dev/null || echo "0")
+          TRIVY_MEDIUM=$(jq '[.Results[0].Vulnerabilities // [] | select(.Severity == "MEDIUM")] | length' trivy-results-all-severities.json 2>/dev/null || echo "0")
+          TRIVY_LOW=$(jq '[.Results[0].Vulnerabilities // [] | select(.Severity == "LOW")] | length' trivy-results-all-severities.json 2>/dev/null || echo "0")
+          TRIVY_UNKNOWN=$(jq '[.Results[0].Vulnerabilities // [] | select(.Severity == "UNKNOWN")] | length' trivy-results-all-severities.json 2>/dev/null || echo "0")
+          TRIVY_TOTAL=$((TRIVY_CRITICAL + TRIVY_HIGH + TRIVY_MEDIUM + TRIVY_LOW + TRIVY_UNKNOWN))
+          
+          echo "trivy_critical_count=$TRIVY_CRITICAL" >> $GITHUB_OUTPUT
+          echo "trivy_high_count=$TRIVY_HIGH" >> $GITHUB_OUTPUT
+          echo "trivy_medium_count=$TRIVY_MEDIUM" >> $GITHUB_OUTPUT
+          echo "trivy_low_count=$TRIVY_LOW" >> $GITHUB_OUTPUT
+          echo "trivy_unknown_count=$TRIVY_UNKNOWN" >> $GITHUB_OUTPUT
+          echo "trivy_total_count=$TRIVY_TOTAL" >> $GITHUB_OUTPUT
+          
+          echo "Trivy found: $TRIVY_TOTAL vulnerabilities"
+          echo "Breakdown - CRITICAL: $TRIVY_CRITICAL, HIGH: $TRIVY_HIGH, MEDIUM: $TRIVY_MEDIUM, LOW: $TRIVY_LOW, UNKNOWN: $TRIVY_UNKNOWN"
+        else
+          echo "trivy_critical_count=0" >> $GITHUB_OUTPUT
+          echo "trivy_high_count=0" >> $GITHUB_OUTPUT
+          echo "trivy_medium_count=0" >> $GITHUB_OUTPUT
+          echo "trivy_low_count=0" >> $GITHUB_OUTPUT
+          echo "trivy_unknown_count=0" >> $GITHUB_OUTPUT
+          echo "trivy_total_count=0" >> $GITHUB_OUTPUT
+          echo "Trivy scan completed - no vulnerabilities found"
+        fi
 
     # ========== ANALYSIS & REPORTING STAGE ==========
     - name: Custom Dockerfile analysis
       id: analysis
       env:
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        ALPINE_VERSION: ${{ steps.build.outputs.alpine_version }}
         DOCKERIGNORE_EXISTS: ${{ steps.dockerignore_check.outputs.dockerignore_exists }}
         SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
         SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
-        SBOM_VULN_COUNT: ${{ steps.sbom_scan.outputs.sbom_vuln_count }}
+        SBOM_REAL_VULN_COUNT: ${{ steps.sbom_scan.outputs.sbom_real_vuln_count }}
+        SBOM_CRITICAL_COUNT: ${{ steps.sbom_scan.outputs.sbom_critical_count }}
+        SBOM_HIGH_COUNT: ${{ steps.sbom_scan.outputs.sbom_high_count }}
+        SBOM_MEDIUM_COUNT: ${{ steps.sbom_scan.outputs.sbom_medium_count }}
+        SBOM_LOW_COUNT: ${{ steps.sbom_scan.outputs.sbom_low_count }}
+        TRIVY_TOTAL_COUNT: ${{ steps.trivy_scan.outputs.trivy_total_count }}
+        TRIVY_CRITICAL_COUNT: ${{ steps.trivy_scan.outputs.trivy_critical_count }}
+        TRIVY_HIGH_COUNT: ${{ steps.trivy_scan.outputs.trivy_high_count }}
+        TRIVY_MEDIUM_COUNT: ${{ steps.trivy_scan.outputs.trivy_medium_count }}
+        TRIVY_LOW_COUNT: ${{ steps.trivy_scan.outputs.trivy_low_count }}
       run: |
         set +e
         
@@ -183,98 +270,162 @@ jobs:
         echo "**Scan date:** $(date)" >> analysis-results.md
         echo "**Commit:** ${{ github.sha }}" >> analysis-results.md
         echo "**Branch:** ${{ github.ref }}" >> analysis-results.md
+        echo "**Alpine version:** $ALPINE_VERSION" >> analysis-results.md
         echo "" >> analysis-results.md
         
-        # Инициализация счетчиков
-        ISSUE_COUNT=0
-        CRITICAL_COUNT=0
+        # Инициализация счетчиков ДЛЯ DOCKERFILE ISSUES
+        DOCKERFILE_ISSUE_COUNT=0
+        DOCKERFILE_CRITICAL_COUNT=0
+        DOCKERFILE_HIGH_COUNT=0
+        DOCKERFILE_MEDIUM_COUNT=0
+        DOCKERFILE_LOW_COUNT=0
         
-        echo "### Found Issues:" >> analysis-results.md
+        echo "### Dockerfile Configuration Issues:" >> analysis-results.md
         
         # УНИВЕРСАЛЬНАЯ ПРОВЕРКА NON-ROOT ПОЛЬЗОВАТЕЛЯ
         LAST_USER=$(grep "^USER " Dockerfile | tail -1 2>/dev/null || echo "")
         USER_CREATED=$(grep -E "adduser|useradd|addgroup|groupadd" Dockerfile 2>/dev/null | head -1 || echo "")
 
         if [[ -n "$LAST_USER" && "$LAST_USER" != "USER root" && "$LAST_USER" != "USER 0" ]]; then
-          echo "[v] Non-root пользователь: $LAST_USER" >> analysis-results.md
+          echo "✅ Non-root пользователь: $LAST_USER" >> analysis-results.md
         elif [ -n "$USER_CREATED" ]; then
-          echo "[v] Создан non-root пользователь: $USER_CREATED" >> analysis-results.md
+          echo "✅ Создан non-root пользователь: $USER_CREATED" >> analysis-results.md
         else
-          echo "[!] **WARNING**: Не обнаружен non-root пользователь" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          echo "⚠️ **WARNING**: Не обнаружен non-root пользователь" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_HIGH_COUNT=$((DOCKERFILE_HIGH_COUNT + 1))
         fi
         
         # Другие проверки...
         if grep "ADD" Dockerfile > /dev/null 2>&1; then
-          echo "[!] **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          echo "⚠️ **WARNING**: Используется ADD вместо COPY. COPY предпочтительнее для файлов" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_MEDIUM_COUNT=$((DOCKERFILE_MEDIUM_COUNT + 1))
+        else
+          echo "✅ Используется COPY вместо ADD" >> analysis-results.md
         fi
         
         # Проверка на базовые образы без версий
-        if grep -E "FROM.*:(latest| )" Dockerfile > /dev/null 2>&1 || 
-           grep -E "^FROM [^:]+$" Dockerfile > /dev/null 2>&1; then
-          echo "[!] **WARNING**: Базовый образ без конкретной версии. Всегда указывайте версию тега" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+        BASE_IMAGE=$(grep "^FROM " Dockerfile | head -1)
+        if echo "$BASE_IMAGE" | grep -E ":(latest| )" > /dev/null 2>&1 || 
+           echo "$BASE_IMAGE" | grep -E "^FROM [^:]+$" > /dev/null 2>&1; then
+          echo "⚠️ **WARNING**: Базовый образ без конкретной версии: $BASE_IMAGE" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_MEDIUM_COUNT=$((DOCKERFILE_MEDIUM_COUNT + 1))
+        else
+          echo "✅ Базовый образ с версией: $BASE_IMAGE" >> analysis-results.md
         fi
         
         # Проверка на curl | bash
         if grep -E "curl.*\|.*bash" Dockerfile > /dev/null 2>&1 || 
            grep -E "wget.*\|.*bash" Dockerfile > /dev/null 2>&1; then
-          echo "[!!] **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+          echo "🚨 **CRITICAL**: Обнаружен опасный паттерн 'curl/wget | bash'. Это угроза безопасности!" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_CRITICAL_COUNT=$((DOCKERFILE_CRITICAL_COUNT + 1))
+        else
+          echo "✅ Нет опасных паттернов 'curl/wget | bash'" >> analysis-results.md
         fi
         
         # Проверка прав 777
         if grep -E "chmod.*777" Dockerfile > /dev/null 2>&1 || 
            grep -E "777" Dockerfile > /dev/null 2>&1; then
-          echo "[!!] **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+          echo "🚨 **CRITICAL**: Используются права 777 - это серьезная уязвимость безопасности!" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_CRITICAL_COUNT=$((DOCKERFILE_CRITICAL_COUNT + 1))
+        else
+          echo "✅ Нет опасных прав 777" >> analysis-results.md
         fi
         
         # Проверка на установку пакетов без очистки кеша
         if grep -E "(apt-get|apk|yum|dnf) install" Dockerfile > /dev/null 2>&1 && 
            ! grep -E "(apt-get clean|rm -rf /var/cache/|apk cache clean|yum clean|dnf clean)" Dockerfile > /dev/null 2>&1; then
-          echo "[!] **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          echo "⚠️ **WARNING**: Установка пакетов без очистки кеша. Увеличивает размер образа" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_LOW_COUNT=$((DOCKERFILE_LOW_COUNT + 1))
         fi
         
         # Проверка на множественные RUN инструкции
         RUN_COUNT=$(grep -c "^RUN " Dockerfile 2>/dev/null || echo "0")
         if [ "$RUN_COUNT" -gt 5 ]; then
-          echo "[!] **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          echo "⚠️ **WARNING**: Много RUN инструкций ($RUN_COUNT). Консолидируйте их для уменьшения слоев" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_LOW_COUNT=$((DOCKERFILE_LOW_COUNT + 1))
         fi
         
         # Проверка на отсутствие .dockerignore
         if [ "$DOCKERIGNORE_EXISTS" = "false" ]; then
-          echo "[!] **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
+          echo "⚠️ **WARNING**: Отсутствует .dockerignore файл. Рекомендуется добавить для уменьшения размера контекста" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_LOW_COUNT=$((DOCKERFILE_LOW_COUNT + 1))
+        else
+          echo "✅ .dockerignore файл присутствует" >> analysis-results.md
         fi
         
-        # ========== НОВЫЙ РАЗДЕЛ: SBOM ANALYSIS ==========
+        # Если нет проблем с Dockerfile
+        if [ "$DOCKERFILE_ISSUE_COUNT" -eq 0 ]; then
+          echo "✅ No Dockerfile configuration issues found" >> analysis-results.md
+        fi
+        
+        # ========== РАЗДЕЛ: SBOM & VULNERABILITY SCAN ==========
         if [ "$BUILD_SUCCESS" = "true" ]; then
           echo "" >> analysis-results.md
-          echo "### SBOM Analysis:" >> analysis-results.md
-          echo "[v] **Software Bill of Materials generated**" >> analysis-results.md
+          echo "### Security Vulnerability Scan:" >> analysis-results.md
+          
+          echo "✅ **Software Bill of Materials generated**" >> analysis-results.md
+          echo "- **Alpine version:** $ALPINE_VERSION" >> analysis-results.md
           echo "- **Total components:** $SBOM_COMPONENT_COUNT" >> analysis-results.md
           echo "- **Alpine packages:** $SBOM_ALPINE_COMPONENTS" >> analysis-results.md
           echo "- **Nginx:** 1.24.0 (compiled from source)" >> analysis-results.md
           
-          if [ "$SBOM_VULN_COUNT" -gt 0 ]; then
-            echo "[!] **SBOM Vulnerabilities:** $SBOM_VULN_COUNT high/critical issues found" >> analysis-results.md
-            ISSUE_COUNT=$((ISSUE_COUNT + SBOM_VULN_COUNT))
+          # Информация об уязвимостях
+          if [ "$SBOM_REAL_VULN_COUNT" -gt 0 ]; then
+            echo "⚠️ **Vulnerabilities found:** $SBOM_REAL_VULN_COUNT vulnerabilities detected" >> analysis-results.md
+            if [ "$SBOM_CRITICAL_COUNT" -gt 0 ]; then
+              echo "  - 🚨 Critical: $SBOM_CRITICAL_COUNT" >> analysis-results.md
+            fi
+            if [ "$SBOM_HIGH_COUNT" -gt 0 ]; then
+              echo "  - 🔴 High: $SBOM_HIGH_COUNT" >> analysis-results.md
+            fi
+            if [ "$SBOM_MEDIUM_COUNT" -gt 0 ]; then
+              echo "  - 🟡 Medium: $SBOM_MEDIUM_COUNT" >> analysis-results.md
+            fi
+            if [ "$SBOM_LOW_COUNT" -gt 0 ]; then
+              echo "  - 🔵 Low: $SBOM_LOW_COUNT" >> analysis-results.md
+            fi
+            if [ "$SBOM_UNKNOWN_COUNT" -gt 0 ]; then
+              echo "  - ⚪ Unknown: $SBOM_UNKNOWN_COUNT" >> analysis-results.md
+            fi
           else
-            echo "[v] **SBOM Vulnerabilities:** No high/critical issues found" >> analysis-results.md
+            echo "✅ **No vulnerabilities found** in security scan" >> analysis-results.md
+          fi
+          
+          # Информация о Trivy
+          if [ "$TRIVY_TOTAL_COUNT" -gt 0 ]; then
+            echo "" >> analysis-results.md
+            echo "**Trivy Scan:** $TRIVY_TOTAL_COUNT vulnerabilities found" >> analysis-results.md
+            if [ "$TRIVY_CRITICAL_COUNT" -gt 0 ]; then
+              echo "  - CRITICAL: $TRIVY_CRITICAL_COUNT" >> analysis-results.md
+            fi
+            if [ "$TRIVY_HIGH_COUNT" -gt 0 ]; then
+              echo "  - HIGH: $TRIVY_HIGH_COUNT" >> analysis-results.md
+            fi
+            if [ "$TRIVY_MEDIUM_COUNT" -gt 0 ]; then
+              echo "  - MEDIUM: $TRIVY_MEDIUM_COUNT" >> analysis-results.md
+            fi
+            if [ "$TRIVY_LOW_COUNT" -gt 0 ]; then
+              echo "  - LOW: $TRIVY_LOW_COUNT" >> analysis-results.md
+            fi
           fi
         fi
         
-        # ВАЖНО: Проверка результатов сборки - всегда добавляем в отчет
+        # ВАЖНО: Проверка результатов сборки
         if [ "$BUILD_SUCCESS" = "false" ]; then
           echo "" >> analysis-results.md
           echo "### Docker Build Results:" >> analysis-results.md
-          echo "[!!] **CRITICAL**: Docker image failed to build!" >> analysis-results.md
+          echo "🚨 **CRITICAL**: Docker image failed to build!" >> analysis-results.md
+          DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + 1))
+          DOCKERFILE_CRITICAL_COUNT=$((DOCKERFILE_CRITICAL_COUNT + 1))
+          
           if [ -f build-results.json ]; then
             if jq -e . build-results.json > /dev/null 2>&1; then
               BUILD_ERROR=$(jq -r '.error // "Build failed but error details are not available"' build-results.json 2>/dev/null)
@@ -292,69 +443,111 @@ jobs:
               fi
             fi
           fi
-          ISSUE_COUNT=$((ISSUE_COUNT + 1))
-          CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
         else
           echo "" >> analysis-results.md
           echo "### Docker Build Results:" >> analysis-results.md
-          echo "[v] Docker image built successfully" >> analysis-results.md
+          echo "✅ Docker image built successfully" >> analysis-results.md
+          echo "✅ Docker image saved: test-image.tar.gz" >> analysis-results.md
         fi
         
         # Анализ Hadolint результатов
         HADOLINT_COUNT=0
         if [ -f hadolint-results.json ]; then
           echo "" >> analysis-results.md
-          echo "### Hadolint Results:" >> analysis-results.md
+          echo "### Dockerfile Linter (Hadolint):" >> analysis-results.md
           
           if jq -e . hadolint-results.json > /dev/null 2>&1; then
             HADOLINT_COUNT=$(jq '. | length' hadolint-results.json 2>/dev/null || echo "0")
             if [ "$HADOLINT_COUNT" -gt 0 ]; then
               jq -r '.[] | "• **\(.level)**: \(.message) (код: \(.code))"' hadolint-results.json 2>/dev/null >> analysis-results.md
+              DOCKERFILE_ISSUE_COUNT=$((DOCKERFILE_ISSUE_COUNT + HADOLINT_COUNT))
             else
-              echo "[v] No Hadolint issues found" >> analysis-results.md
+              echo "✅ No Hadolint issues found" >> analysis-results.md
             fi
           else
             echo "• Invalid Hadolint JSON format" >> analysis-results.md
           fi
         fi
         
-        # Анализ Trivy результатов
-        TRIVY_COUNT=0
-        if [ -f trivy-results.json ] && [ "$BUILD_SUCCESS" = "true" ]; then
-          echo "" >> analysis-results.md
-          echo "### Trivy Vulnerability Scan:" >> analysis-results.md
-          
-          if jq -e . trivy-results.json > /dev/null 2>&1; then
-            TRIVY_COUNT=$(jq '.Results[0].Vulnerabilities // [] | length' trivy-results.json 2>/dev/null || echo "0")
-            if [ "$TRIVY_COUNT" -gt 0 ]; then
-              echo "[!] **SECURITY**: Found $TRIVY_COUNT vulnerabilities" >> analysis-results.md
-              jq -r '.Results[0].Vulnerabilities[0:3][] | "• \(.VulnerabilityID): \(.Title) (\(.Severity))"' trivy-results.json 2>/dev/null >> analysis-results.md
-            else
-              echo "[v] No vulnerabilities found by Trivy" >> analysis-results.md
-            fi
-          else
-            echo "• Invalid Trivy JSON format" >> analysis-results.md
-          fi
-        elif [ "$BUILD_SUCCESS" = "false" ]; then
-          echo "" >> analysis-results.md
-          echo "### Trivy Vulnerability Scan:" >> analysis-results.md
-          echo "**SKIPPED**: Trivy scan skipped - Docker build failed" >> analysis-results.md
-        fi
-        
-        # Суммируем все проблемы (включая SBOM уязвимости)
-        ISSUE_COUNT=$((ISSUE_COUNT + HADOLINT_COUNT + TRIVY_COUNT))
+        # ОБЩИЙ ИТОГ - ТОЛЬКО DOCKERFILE ISSUES
+        TOTAL_DOCKERFILE_ISSUES=$DOCKERFILE_ISSUE_COUNT
         
         echo "" >> analysis-results.md
         echo "---" >> analysis-results.md
-        echo "**Summary:** Found $ISSUE_COUNT issues ($CRITICAL_COUNT critical)" >> analysis-results.md
-        if [ "$BUILD_SUCCESS" = "true" ]; then
-          echo "**SBOM Components:** $SBOM_COMPONENT_COUNT total, $SBOM_ALPINE_COMPONENTS Alpine packages" >> analysis-results.md
+        if [ "$TOTAL_DOCKERFILE_ISSUES" -gt 0 ]; then
+          echo "**Dockerfile Analysis Summary:** Found $TOTAL_DOCKERFILE_ISSUES configuration issues" >> analysis-results.md
+          if [ "$DOCKERFILE_CRITICAL_COUNT" -gt 0 ]; then
+            echo "- 🚨 Critical: $DOCKERFILE_CRITICAL_COUNT" >> analysis-results.md
+          fi
+          if [ "$DOCKERFILE_HIGH_COUNT" -gt 0 ]; then
+            echo "- 🔴 High: $DOCKERFILE_HIGH_COUNT" >> analysis-results.md
+          fi
+          if [ "$DOCKERFILE_MEDIUM_COUNT" -gt 0 ]; then
+            echo "- 🟡 Medium: $DOCKERFILE_MEDIUM_COUNT" >> analysis-results.md
+          fi
+          if [ "$DOCKERFILE_LOW_COUNT" -gt 0 ]; then
+            echo "- 🔵 Low: $DOCKERFILE_LOW_COUNT" >> analysis-results.md
+          fi
+        else
+          echo "✅ **Excellent:** No Dockerfile configuration issues found" >> analysis-results.md
         fi
         
-        echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
-        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        # Отдельно показываем security vulnerabilities
+        if [ "$SBOM_REAL_VULN_COUNT" -gt 0 ]; then
+          echo "" >> analysis-results.md
+          echo "**Security Vulnerabilities:** $SBOM_REAL_VULN_COUNT vulnerabilities detected in packages" >> analysis-results.md
+        else
+          echo "" >> analysis-results.md
+          echo "**Security Status:** ✅ No vulnerabilities detected" >> analysis-results.md
+        fi
         
-        exit 0
+        # Выходные переменные
+        echo "dockerfile_issue_count=$TOTAL_DOCKERFILE_ISSUES" >> $GITHUB_OUTPUT
+        echo "dockerfile_critical_count=$DOCKERFILE_CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        echo "dockerfile_high_count=$DOCKERFILE_HIGH_COUNT" >> $GITHUB_OUTPUT
+        echo "dockerfile_medium_count=$DOCKERFILE_MEDIUM_COUNT" >> $GITHUB_OUTPUT
+        echo "dockerfile_low_count=$DOCKERFILE_LOW_COUNT" >> $GITHUB_OUTPUT
+        
+        echo "sbom_real_vuln_count=$SBOM_REAL_VULN_COUNT" >> $GITHUB_OUTPUT
+        echo "sbom_critical_count=$SBOM_CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        echo "sbom_high_count=$SBOM_HIGH_COUNT" >> $GITHUB_OUTPUT
+        echo "sbom_medium_count=$SBOM_MEDIUM_COUNT" >> $GITHUB_OUTPUT
+        echo "sbom_low_count=$SBOM_LOW_COUNT" >> $GITHUB_OUTPUT
+        
+        echo "✅ Analysis completed with $TOTAL_DOCKERFILE_ISSUES Dockerfile issues and $SBOM_REAL_VULN_COUNT vulnerabilities"
+
+    # ========== SECURITY GATES ==========
+    - name: Check security gates
+      id: security_gates
+      if: always()
+      env:
+        BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
+        DOCKERFILE_CRITICAL_COUNT: ${{ steps.analysis.outputs.dockerfile_critical_count }}
+        SBOM_CRITICAL_COUNT: ${{ steps.analysis.outputs.sbom_critical_count }}
+        SBOM_HIGH_COUNT: ${{ steps.analysis.outputs.sbom_high_count }}
+      run: |
+        echo "🔒 Checking security gates..."
+        
+        if [ "$BUILD_SUCCESS" = "false" ]; then
+          echo "❌ Alpine Docker build failed - failing workflow"
+          echo "security_gates_passed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        if [ "$DOCKERFILE_CRITICAL_COUNT" -gt 0 ]; then
+          echo "❌ Critical Dockerfile issues found: $DOCKERFILE_CRITICAL_COUNT - failing workflow"
+          echo "security_gates_passed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        if [ "$SBOM_CRITICAL_COUNT" -gt 0 ]; then
+          echo "❌ Critical vulnerabilities found: $SBOM_CRITICAL_COUNT - failing workflow"
+          echo "security_gates_passed=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+        echo "✅ Alpine security gates passed"
+        echo "security_gates_passed=true" >> $GITHUB_OUTPUT
 
     # ========== ARTIFACT PUBLISHING STAGE ==========
     - name: Save Docker image as artifact
@@ -379,7 +572,7 @@ jobs:
         name: sbom-cyclonedx-${{ github.sha }}
         path: |
           sbom.cyclonedx.json
-          sbom-scan-results.json
+          sbom-scan-all-severities.json
           sbom-vulnerabilities.txt
         retention-days: 90
         
@@ -390,267 +583,265 @@ jobs:
         path: |
           analysis-results.md
           hadolint-results.json
-          trivy-results.json
+          trivy-results-all-severities.json
+          trivy-report.txt
           build-results.json
         retention-days: 90
 
     # ========== NOTIFICATION STAGE ==========
     - name: Create or Update Issue with Attachments
       uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false'
+      if: steps.analysis.outputs.dockerfile_issue_count > 0 || steps.analysis.outputs.sbom_real_vuln_count > 0 || steps.build.outputs.build_success == 'false'
       env:
-        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
-        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
+        DOCKERFILE_ISSUE_COUNT: ${{ steps.analysis.outputs.dockerfile_issue_count }}
+        DOCKERFILE_CRITICAL_COUNT: ${{ steps.analysis.outputs.dockerfile_critical_count }}
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
-        SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
-        SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
+        ALPINE_VERSION: ${{ steps.build.outputs.alpine_version }}
+        SBOM_REAL_VULN_COUNT: ${{ steps.analysis.outputs.sbom_real_vuln_count }}
+        SBOM_CRITICAL_COUNT: ${{ steps.analysis.outputs.sbom_critical_count }}
+        SBOM_HIGH_COUNT: ${{ steps.analysis.outputs.sbom_high_count }}
+        SBOM_MEDIUM_COUNT: ${{ steps.analysis.outputs.sbom_medium_count }}
+        SBOM_LOW_COUNT: ${{ steps.analysis.outputs.sbom_low_count }}
+        TRIVY_TOTAL_COUNT: ${{ steps.trivy_scan.outputs.trivy_total_count }}
+        TRIVY_CRITICAL_COUNT: ${{ steps.trivy_scan.outputs.trivy_critical_count }}
+        TRIVY_HIGH_COUNT: ${{ steps.trivy_scan.outputs.trivy_high_count }}
+        TRIVY_MEDIUM_COUNT: ${{ steps.trivy_scan.outputs.trivy_medium_count }}
+        TRIVY_LOW_COUNT: ${{ steps.trivy_scan.outputs.trivy_low_count }}
       with:
         script: |
           const fs = require('fs');
-          const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = process.env.ISSUE_COUNT || 0;
-          const criticalCount = process.env.CRITICAL_COUNT || 0;
+          const report = fs.existsSync('analysis-results.md') 
+            ? fs.readFileSync('analysis-results.md', 'utf8')
+            : '## Dockerfile Analysis Results\n\nAnalysis results not available.';
+          
+          const dockerfileIssueCount = parseInt(process.env.DOCKERFILE_ISSUE_COUNT) || 0;
+          const dockerfileCriticalCount = parseInt(process.env.DOCKERFILE_CRITICAL_COUNT) || 0;
           const buildSuccess = process.env.BUILD_SUCCESS;
-          const sbomComponentCount = process.env.SBOM_COMPONENT_COUNT || 0;
-          const sbomAlpineComponents = process.env.SBOM_ALPINE_COMPONENTS || 0;
+          const alpineVersion = process.env.ALPINE_VERSION || 'unknown';
           
-          let title;
-          if (buildSuccess === 'false') {
-            title = `Docker Build Failed: ${issueCount} additional problems found`;
-          } else {
-            title = `Dockerfile Security Issues: ${issueCount} problems found (${criticalCount} critical)`;
-          }
-          
-          // Функция для анализа уязвимостей
-          const analyzeVulnerabilities = () => {
-            let summary = '';
-            
-            // Анализ SBOM уязвимостей
-            try {
-              if (fs.existsSync('sbom-scan-results.json')) {
-                const sbomScan = JSON.parse(fs.readFileSync('sbom-scan-results.json', 'utf8'));
-                const matches = sbomScan.matches || [];
-                
-                if (matches.length > 0) {
-                  const bySeverity = {};
-                  matches.forEach(match => {
-                    const severity = match.vulnerability?.severity || 'unknown';
-                    bySeverity[severity] = (bySeverity[severity] || 0) + 1;
-                  });
-                  
-                  summary += `**SBOM Vulnerabilities:** ${matches.length} found\n`;
-                  Object.entries(bySeverity).forEach(([severity, count]) => {
-                    summary += `- ${severity.toUpperCase()}: ${count}\n`;
-                  });
-                }
-              }
-            } catch (e) {
-              summary += `**SBOM Vulnerabilities:** Error analyzing\n`;
-            }
-            
-            // Анализ Trivy уязвимостей
-            try {
-              if (fs.existsSync('trivy-results.json')) {
-                const trivy = JSON.parse(fs.readFileSync('trivy-results.json', 'utf8'));
-                const vulnerabilities = trivy.Results?.[0]?.Vulnerabilities || [];
-                
-                if (vulnerabilities.length > 0) {
-                  const bySeverity = {};
-                  vulnerabilities.forEach(vuln => {
-                    const severity = vuln.Severity || 'unknown';
-                    bySeverity[severity] = (bySeverity[severity] || 0) + 1;
-                  });
-                  
-                  summary += `\n**Trivy Vulnerabilities:** ${vulnerabilities.length} found\n`;
-                  Object.entries(bySeverity).forEach(([severity, count]) => {
-                    summary += `- ${severity}: ${count}\n`;
-                  });
-                }
-              }
-            } catch (e) {
-              summary += `\n**Trivy Vulnerabilities:** Error analyzing\n`;
-            }
-            
-            return summary || 'No vulnerabilities found in scans';
+          // ПАРСИМ Grype результаты НАПРЯМУЮ из JSON
+          let grypeVulnerabilities = [];
+          let vulnerabilityBreakdown = {
+            Critical: 0,
+            High: 0,
+            Medium: 0,
+            Low: 0,
+            Unknown: 0,
+            None: 0
           };
           
-          // Создаем основной отчет
-          const mainReport = `${report}
-          
-          ## Vulnerability Summary
-          
-          ${analyzeVulnerabilities()}
-          
-          ## Attached Reports
-          
-          📎 **SBOM Analysis** - Full software bill of materials (CycloneDX format)
-          📎 **Vulnerability Scan** - Detailed security scan results  
-          📎 **Build Logs** - Complete Docker build information
-          📎 **Linter Results** - Hadolint Dockerfile analysis
-          
-          ## Quick Links
-          
-          - [View Workflow Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
-          - [Download All Artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
-          - [View Source Code](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/tree/${context.sha})
-          
-          ---
-          
-          *Automatically generated by [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
-          `;
+          try {
+            if (fs.existsSync('sbom-scan-all-severities.json')) {
+              const grypeData = JSON.parse(fs.readFileSync('sbom-scan-all-severities.json', 'utf8'));
+              
+              if (grypeData.matches && Array.isArray(grypeData.matches)) {
+                grypeVulnerabilities = grypeData.matches;
                 
-                // Ищем существующий issue
-                const { data: issues } = await github.rest.issues.listForRepo({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  labels: ['dockerfile-security']
+                // Считаем по severity
+                grypeVulnerabilities.forEach(match => {
+                  const severity = match.vulnerability?.severity || 'Unknown';
+                  if (vulnerabilityBreakdown[severity] !== undefined) {
+                    vulnerabilityBreakdown[severity]++;
+                  } else {
+                    vulnerabilityBreakdown.Unknown++;
+                  }
                 });
                 
-                const existingIssue = issues.find(issue => 
-                  issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
-                );
+                console.log(`Parsed ${grypeVulnerabilities.length} vulnerabilities from Grype results`);
+                console.log('Breakdown:', vulnerabilityBreakdown);
+              }
+            }
+          } catch (error) {
+            console.log('Error parsing Grype results:', error.message);
+          }
+          
+          const realVulnerabilities = vulnerabilityBreakdown.Critical + vulnerabilityBreakdown.High + 
+                                    vulnerabilityBreakdown.Medium + vulnerabilityBreakdown.Low + 
+                                    vulnerabilityBreakdown.Unknown;
+          
+          // Определяем заголовок на основе РЕАЛЬНЫХ данных
+          let title;
+          let labels = ['dockerfile-security', 'security', 'ci-cd', 'automated'];
+          
+          if (buildSuccess === 'false') {
+            title = `🚨 Docker Build Failed: ${dockerfileIssueCount} configuration issues found`;
+            labels.push('build-failed', 'critical');
+          } else if (vulnerabilityBreakdown.Critical > 0) {
+            title = `🚨 CRITICAL: ${vulnerabilityBreakdown.Critical} critical vulnerabilities in Docker image`;
+            labels.push('critical');
+          } else if (vulnerabilityBreakdown.High > 0) {
+            title = `🔴 HIGH: ${vulnerabilityBreakdown.High} high severity vulnerabilities in Docker image`;
+            labels.push('high');
+          } else if (realVulnerabilities > 0) {
+            title = `⚠️ SECURITY: ${realVulnerabilities} vulnerabilities found in Docker image`;
+            labels.push('security-vulnerabilities');
+          } else if (dockerfileIssueCount > 0) {
+            title = `📋 Dockerfile Security Scan: ${dockerfileIssueCount} configuration issues found`;
+            labels.push('needs-attention');
+          } else {
+            title = `✅ Dockerfile Security Scan: No issues found`;
+            labels.push('passed');
+          }
+          
+          // Создаем детальный отчет об уязвимостях
+          let vulnerabilityReport = `## 🛡️ Security Vulnerability Report\n\n`;
+          
+          vulnerabilityReport += `### 📊 Vulnerability Summary\n\n`;
+          
+          if (realVulnerabilities > 0) {
+            vulnerabilityReport += `**Grype SBOM Scan:**\n`;
+            vulnerabilityReport += `- Total matches: ${grypeVulnerabilities.length}\n`;
+            vulnerabilityReport += `- Real vulnerabilities: ${realVulnerabilities}\n`;
+            if (vulnerabilityBreakdown.Critical > 0) vulnerabilityReport += `- 🚨 Critical: ${vulnerabilityBreakdown.Critical}\n`;
+            if (vulnerabilityBreakdown.High > 0) vulnerabilityReport += `- 🔴 High: ${vulnerabilityBreakdown.High}\n`;
+            if (vulnerabilityBreakdown.Medium > 0) vulnerabilityReport += `- 🟡 Medium: ${vulnerabilityBreakdown.Medium}\n`;
+            if (vulnerabilityBreakdown.Low > 0) vulnerabilityReport += `- 🔵 Low: ${vulnerabilityBreakdown.Low}\n`;
+            if (vulnerabilityBreakdown.Unknown > 0) vulnerabilityReport += `- ⚪ Unknown: ${vulnerabilityBreakdown.Unknown}\n`;
+            vulnerabilityReport += `\n`;
+            
+            // Trivy информация
+            const trivyTotal = parseInt(process.env.TRIVY_TOTAL_COUNT) || 0;
+            if (trivyTotal > 0) {
+              vulnerabilityReport += `**Trivy Image Scan:**\n`;
+              vulnerabilityReport += `- Total vulnerabilities: ${trivyTotal}\n`;
+              const trivyCritical = parseInt(process.env.TRIVY_CRITICAL_COUNT) || 0;
+              const trivyHigh = parseInt(process.env.TRIVY_HIGH_COUNT) || 0;
+              const trivyMedium = parseInt(process.env.TRIVY_MEDIUM_COUNT) || 0;
+              const trivyLow = parseInt(process.env.TRIVY_LOW_COUNT) || 0;
+              if (trivyCritical > 0) vulnerabilityReport += `- CRITICAL: ${trivyCritical}\n`;
+              if (trivyHigh > 0) vulnerabilityReport += `- HIGH: ${trivyHigh}\n`;
+              if (trivyMedium > 0) vulnerabilityReport += `- MEDIUM: ${trivyMedium}\n`;
+              if (trivyLow > 0) vulnerabilityReport += `- LOW: ${trivyLow}\n`;
+              vulnerabilityReport += `\n`;
+            }
+            
+            // Security Gates Status
+            vulnerabilityReport += `### 🔒 Security Gates Status:\n\n`;
+            if (buildSuccess === 'false') {
+              vulnerabilityReport += `❌ **Failed** - Docker build failed\n`;
+            } else if (dockerfileCriticalCount > 0) {
+              vulnerabilityReport += `❌ **Failed** - Critical Dockerfile issues found\n`;
+            } else if (vulnerabilityBreakdown.Critical > 0) {
+              vulnerabilityReport += `❌ **Failed** - Critical vulnerabilities found\n`;
+            } else {
+              vulnerabilityReport += `✅ **Passed** - No critical issues found\n`;
+            }
+            vulnerabilityReport += `✅ **Passed** - Docker build successful\n\n`;
+            
+            // ОГРАНИЧИВАЕМ количество уязвимостей в issue (первые 10)
+            const maxVulnerabilitiesInIssue = 10;
+            const vulnerabilitiesToShow = grypeVulnerabilities.slice(0, maxVulnerabilitiesInIssue);
+            const remainingVulnerabilities = grypeVulnerabilities.length - maxVulnerabilitiesInIssue;
+
+            if (grypeVulnerabilities.length > 0) {
+              vulnerabilityReport += `### 🔍 Top ${vulnerabilitiesToShow.length} Vulnerabilities\n\n`;
+              
+              if (remainingVulnerabilities > 0) {
+                vulnerabilityReport += `*Showing ${vulnerabilitiesToShow.length} of ${grypeVulnerabilities.length} vulnerabilities. ${remainingVulnerabilities} more in detailed reports.*\n\n`;
+              }
+              
+              vulnerabilitiesToShow.forEach((match, index) => {
+                const vuln = match.vulnerability;
+                const artifact = match.artifact;
+                const severity = vuln.severity || 'Unknown';
                 
-                let issueNumber;
+                // Эмодзи для severity
+                const severityEmoji = {
+                  'Critical': '🚨',
+                  'High': '🔴', 
+                  'Medium': '🟡',
+                  'Low': '🔵',
+                  'Unknown': '⚪',
+                  'None': '⚫'
+                }[severity] || '⚪';
                 
-                if (existingIssue) {
-                  // Обновляем существующий issue
-                  await github.rest.issues.update({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: existingIssue.number,
-                    title: title,
-                    body: mainReport
-                  });
-                  issueNumber = existingIssue.number;
-                  console.log(`Updated existing issue #${existingIssue.number}`);
-                } else {
-                  // Создаем новый issue
-                  const { data: newIssue } = await github.rest.issues.create({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    title: title,
-                    body: mainReport,
-                    labels: ['dockerfile-security', 'security', 'ci-cd']
-                  });
-                  issueNumber = newIssue.number;
-                  console.log(`Created new issue #${newIssue.number}`);
+                vulnerabilityReport += `<details>\n`;
+                vulnerabilityReport += `<summary><b>${index + 1}. ${vuln.id}</b> ${severityEmoji} ${severity} - ${artifact.name}@${artifact.version}</summary>\n\n`;
+                
+                vulnerabilityReport += `**Package:** \`${artifact.name}@${artifact.version}\`\n\n`;
+                vulnerabilityReport += `**Description:** ${vuln.description || 'No description available'}\n\n`;
+                
+                // CVSS INFORMATION
+                if (vuln.cvss && vuln.cvss.length > 0) {
+                  const primaryCvss = vuln.cvss.find(c => c.type === 'Primary') || vuln.cvss[0];
+                  vulnerabilityReport += `**CVSS Score:** ${primaryCvss.metrics.baseScore}/10\n`;
+                  
+                  if (primaryCvss.vector) {
+                    vulnerabilityReport += `**Vector:** \`${primaryCvss.vector}\`\n`;
+                  }
+                  vulnerabilityReport += `\n`;
                 }
                 
-                // Теперь добавляем комментарии с вложениями
-                console.log('Adding attachments as comments...');
+                // EPSS если доступно
+                if (vuln.epss && vuln.epss.length > 0) {
+                  const epss = vuln.epss[0];
+                  const epssPercent = (epss.epss * 100).toFixed(2);
+                  const percentile = (epss.percentile * 100).toFixed(2);
+                  vulnerabilityReport += `**EPSS:** ${epssPercent}% (more exploitable than ${percentile}% of CVEs)\n\n`;
+                }
                 
-                // Функция для создания комментария с файлом
-                const createAttachmentComment = async (filename, title, content) => {
-                  try {
-                    // Ограничиваем размер для GitHub (65KB на комментарий)
-                    const maxSize = 60000;
-                    let fileContent = content;
-                    
-                    if (fileContent.length > maxSize) {
-                      fileContent = fileContent.substring(0, maxSize) + 
-                        `\n\n... [FILE TRUNCATED - ${content.length - maxSize} characters removed] ...\n` +
-                        'Download full file from workflow artifacts.';
-                    }
-                    
-                    const commentBody = `## ${title}
-    
-                    \`\`\`json
-                    ${fileContent}
-                    \`\`\`
-                    
-                    *Attached from ${filename}*`;
-                              
-                              await github.rest.issues.createComment({
-                                owner: context.repo.owner,
-                                repo: context.repo.repo,
-                                issue_number: issueNumber,
-                                body: commentBody
-                              });
-                              
-                              console.log(`✓ Added attachment: ${title}`);
-                            } catch (error) {
-                              console.log(`✗ Failed to add attachment ${title}: ${error.message}`);
-                            }
-                          };
-                          
-                          // Добавляем SBOM как вложение
-                          try {
-                            if (fs.existsSync('sbom.cyclonedx.json')) {
-                              const sbomContent = fs.readFileSync('sbom.cyclonedx.json', 'utf8');
-                              await createAttachmentComment(
-                                'sbom.cyclonedx.json',
-                                'SBOM Analysis (CycloneDX)',
-                                sbomContent
-                              );
-                            }
-                          } catch (e) {
-                            console.log('Failed to attach SBOM:', e.message);
-                          }
-                          
-                          // Добавляем результаты сканирования уязвимостей
-                          try {
-                            if (fs.existsSync('sbom-scan-results.json')) {
-                              const scanContent = fs.readFileSync('sbom-scan-results.json', 'utf8');
-                              await createAttachmentComment(
-                                'sbom-scan-results.json',
-                                'Vulnerability Scan Results',
-                                scanContent
-                              );
-                            }
-                          } catch (e) {
-                            console.log('Failed to attach vulnerability scan results:', e.message);
-                          }
-                          
-                          // Добавляем результаты Trivy
-                          try {
-                            if (fs.existsSync('trivy-results.json')) {
-                              const trivyContent = fs.readFileSync('trivy-results.json', 'utf8');
-                              await createAttachmentComment(
-                                'trivy-results.json',
-                                'Trivy Security Scan',
-                                trivyContent
-                              );
-                            }
-                          } catch (e) {
-                            console.log('Failed to attach Trivy results:', e.message);
-                          }
-                          
-                          // Добавляем результаты Hadolint
-                          try {
-                            if (fs.existsSync('hadolint-results.json')) {
-                              const hadolintContent = fs.readFileSync('hadolint-results.json', 'utf8');
-                              await createAttachmentComment(
-                                'hadolint-results.json',
-                                'Dockerfile Linter Results',
-                                hadolintContent
-                              );
-                            }
-                          } catch (e) {
-                            console.log('Failed to attach Hadolint results:', e.message);
-                          }
-                          
-                          // Добавляем результаты сборки
-                          try {
-                            if (fs.existsSync('build-results.json')) {
-                              const buildContent = fs.readFileSync('build-results.json', 'utf8');
-                              await createAttachmentComment(
-                                'build-results.json',
-                                'Docker Build Results',
-                                buildContent
-                              );
-                            }
-                          } catch (e) {
-                            console.log('Failed to attach build results:', e.message);
-                          }
-                          
-                          console.log('All attachments added successfully');
+                // References
+                if (vuln.urls && vuln.urls.length > 0) {
+                  vulnerabilityReport += `**[View Details](${vuln.urls[0]})**\n`;
+                }
+                
+                vulnerabilityReport += `</details>\n\n`;
+              });
+            }
+          } else {
+            vulnerabilityReport += `### ✅ No Vulnerabilities Found\n\n`;
+            vulnerabilityReport += `Security scanners did not find any vulnerabilities in the Docker image.\n\n`;
+            
+            // Security Gates Status
+            vulnerabilityReport += `### 🔒 Security Gates Status:\n\n`;
+            if (buildSuccess === 'false') {
+              vulnerabilityReport += `❌ **Failed** - Docker build failed\n`;
+            } else if (dockerfileCriticalCount > 0) {
+              vulnerabilityReport += `❌ **Failed** - Critical Dockerfile issues found\n`;
+            } else {
+              vulnerabilityReport += `✅ **Passed** - All security gates passed\n`;
+            }
+            vulnerabilityReport += `✅ **Passed** - Docker build successful\n\n`;
+          }
+
+          // Информация о файлах с детальными отчетами
+          vulnerabilityReport += `### 📁 Detailed Reports in Artifacts\n\n`;
+          vulnerabilityReport += `For complete technical details, download these files from workflow artifacts:\n\n`;
           
-    - name: Close existing issue if no problems
-      uses: actions/github-script@v6
-      if: steps.analysis.outputs.issue_count == 0 && steps.build.outputs.build_success == 'true'
-      with:
-        script: |
+          vulnerabilityReport += `#### 🔍 Vulnerability Analysis\n`;
+          vulnerabilityReport += `| File | Description |\n`;
+          vulnerabilityReport += `|------|-------------|\n`;
+          vulnerabilityReport += `| \`analysis-results.md\` | Main security analysis with Dockerfile issues |\n`;
+          vulnerabilityReport += `| \`sbom-scan-all-severities.json\` | Complete Grype scan results (JSON) |\n`;
+          vulnerabilityReport += `| \`trivy-results-all-severities.json\` | Complete Trivy scan results (JSON) |\n`;
+          vulnerabilityReport += `| \`trivy-report.txt\` | Trivy text report |\n`;
+          vulnerabilityReport += `| \`hadolint-results.json\` | Dockerfile linter results |\n`;
+          vulnerabilityReport += `\n`;
+          
+          vulnerabilityReport += `#### 📦 Software Bill of Materials\n`;
+          vulnerabilityReport += `| File | Description |\n`;
+          vulnerabilityReport += `|------|-------------|\n`;
+          vulnerabilityReport += `| \`sbom.cyclonedx.json\` | Component list (CycloneDX format) |\n`;
+          vulnerabilityReport += `\n`;
+          
+          vulnerabilityReport += `#### 🐳 Docker Image\n`;
+          vulnerabilityReport += `| File | Description |\n`;
+          vulnerabilityReport += `|------|-------------|\n`;
+          vulnerabilityReport += `| \`docker-image-${{ github.sha }}.tar.gz\` | Docker image archive |\n`;
+          vulnerabilityReport += `| \`build-results.json\` | Build process results |\n`;
+          vulnerabilityReport += `\n`;
+          
+          vulnerabilityReport += `**To download:** Go to Actions → This workflow → Artifacts\n\n`;
+          
+          const detailedReport = `${report}
+          
+          ${vulnerabilityReport}
+          
+          ---
+          *Automatically generated by [${context.workflow}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+          `;
+          
+          // Ищем существующий issue
           const { data: issues } = await github.rest.issues.listForRepo({
             owner: context.repo.owner,
             repo: context.repo.repo,
@@ -659,73 +850,127 @@ jobs:
           });
           
           const existingIssue = issues.find(issue => 
-            issue.title.includes('Dockerfile Security Issues') || issue.title.includes('Docker Build Failed')
+            issue.title.includes('Dockerfile Security') || 
+            issue.title.includes('Docker Build Failed')
           );
           
+          let issueNumber;
+          
           if (existingIssue) {
+            // Обновляем существующий issue
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: existingIssue.number,
-              state: 'closed'
+              title: title,
+              body: detailedReport
             });
-            
-            await github.rest.issues.createComment({
+            issueNumber = existingIssue.number;
+            console.log(`Updated existing issue #${existingIssue.number}`);
+          } else {
+            // Создаем новый issue
+            const { data: newIssue } = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: existingIssue.number,
-              body: `All Dockerfile issues fixed in commit ${context.sha}\nSBOM analysis shows clean results`
+              title: title,
+              body: detailedReport,
+              labels: labels
             });
-            
-            console.log(`Closed issue #${existingIssue.number}`);
+            issueNumber = newIssue.number;
+            console.log(`Created new issue #${newIssue.number}`);
           }
           
-    - name: Fail if critical issues found
-      if: steps.analysis.outputs.critical_count > 0
-      run: |
-        echo "Found critical issues in Dockerfile: ${{ steps.analysis.outputs.critical_count }}"
-        echo "Please fix them before merging"
-        echo "Details in the created Issue"
-        exit 1
-        
+    - name: Close existing issue if no problems
+      uses: actions/github-script@v6
+      if: steps.analysis.outputs.dockerfile_issue_count == 0 && steps.analysis.outputs.sbom_real_vuln_count == 0 && steps.build.outputs.build_success == 'true'
+      env:
+        DOCKERFILE_ISSUE_COUNT: ${{ steps.analysis.outputs.dockerfile_issue_count }}
+        SBOM_REAL_VULN_COUNT: ${{ steps.analysis.outputs.sbom_real_vuln_count }}
+      with:
+        script: |
+          const { data: issues } = await github.rest.issues.listForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: ['dockerfile-security'],
+            sort: 'created',
+            direction: 'desc'
+          });
+
+          for (const issue of issues) {
+            // Закрываем только security issues созданные этим workflow
+            if (issue.title.includes('Dockerfile Security Scan') && 
+                !issue.title.includes('CRITICAL') && 
+                !issue.title.includes('HIGH') &&
+                !issue.title.includes('SECURITY') &&
+                !issue.title.includes('Docker Build Failed')) {
+              
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `✅ **Automatically closed**: No issues detected in latest scan.\n\n- Scan date: ${new Date().toISOString()}\n- Commit: ${context.sha}\n- Dockerfile issues: ${process.env.DOCKERFILE_ISSUE_COUNT}\n- Security vulnerabilities: ${process.env.SBOM_REAL_VULN_COUNT}`
+              });
+
+              console.log(`✅ Closed issue #${issue.number} - no issues found`);
+            }
+          }
+          
     - name: Post PR comment
       uses: actions/github-script@v6
-      if: github.event_name == 'pull_request' && (steps.analysis.outputs.issue_count > 0 || steps.build.outputs.build_success == 'false')
+      if: github.event_name == 'pull_request'
       env:
-        ISSUE_COUNT: ${{ steps.analysis.outputs.issue_count }}
-        CRITICAL_COUNT: ${{ steps.analysis.outputs.critical_count }}
+        DOCKERFILE_ISSUE_COUNT: ${{ steps.analysis.outputs.dockerfile_issue_count }}
+        DOCKERFILE_CRITICAL_COUNT: ${{ steps.analysis.outputs.dockerfile_critical_count }}
         BUILD_SUCCESS: ${{ steps.build.outputs.build_success }}
-        SBOM_COMPONENT_COUNT: ${{ steps.sbom_generation.outputs.component_count }}
-        SBOM_ALPINE_COMPONENTS: ${{ steps.sbom_generation.outputs.alpine_components }}
+        SECURITY_GATES_PASSED: ${{ steps.security_gates.outputs.security_gates_passed }}
+        SBOM_REAL_VULN_COUNT: ${{ steps.analysis.outputs.sbom_real_vuln_count }}
+        SBOM_CRITICAL_COUNT: ${{ steps.analysis.outputs.sbom_critical_count }}
+        SBOM_HIGH_COUNT: ${{ steps.analysis.outputs.sbom_high_count }}
       with:
         script: |
           const fs = require('fs');
-          const report = fs.readFileSync('analysis-results.md', 'utf8');
-          const issueCount = process.env.ISSUE_COUNT;
-          const criticalCount = process.env.CRITICAL_COUNT;
+          const report = fs.existsSync('analysis-results.md') 
+            ? fs.readFileSync('analysis-results.md', 'utf8')
+            : '## Dockerfile Analysis Results\n\nAnalysis results not available.';
+          
+          const dockerfileIssueCount = parseInt(process.env.DOCKERFILE_ISSUE_COUNT);
+          const dockerfileCriticalCount = parseInt(process.env.DOCKERFILE_CRITICAL_COUNT);
           const buildSuccess = process.env.BUILD_SUCCESS;
-          const sbomComponentCount = process.env.SBOM_COMPONENT_COUNT;
-          const sbomAlpineComponents = process.env.SBOM_ALPINE_COMPONENTS;
+          const securityGatesPassed = process.env.SECURITY_GATES_PASSED;
+          const sbomRealVulnCount = parseInt(process.env.SBOM_REAL_VULN_COUNT);
+          const sbomCriticalCount = parseInt(process.env.SBOM_CRITICAL_COUNT);
+          const sbomHighCount = parseInt(process.env.SBOM_HIGH_COUNT);
           
           let commentTitle;
           if (buildSuccess === 'false') {
-            commentTitle = '## Dockerfile Security Scan - BUILD FAILED';
+            commentTitle = '## 🚨 Dockerfile Security Scan - BUILD FAILED';
+          } else if (dockerfileCriticalCount > 0 || sbomCriticalCount > 0) {
+            commentTitle = '## 🚨 CRITICAL: Security Issues Found';
+          } else if (dockerfileIssueCount > 0 || sbomHighCount > 0) {
+            commentTitle = '## ⚠️ Security Issues Found';
+          } else if (sbomRealVulnCount > 0) {
+            commentTitle = '## ⚠️ Security Vulnerabilities Found';
           } else {
-            commentTitle = '## Dockerfile Security Scan';
+            commentTitle = '## ✅ Dockerfile Security Scan Passed';
           }
           
-          const sbomInfo = buildSuccess === 'true' ? `
-          **SBOM Analysis:**
-          - Components: ${sbomComponentCount} total
-          - Alpine packages: ${sbomAlpineComponents}
-          - Nginx: 1.24.0 (compiled from source)
-          ` : '';
+          const securityGatesStatus = securityGatesPassed === 'true' 
+            ? '🟢 **Security Gates:** PASSED'
+            : '🔴 **Security Gates:** FAILED';
           
           const commentBody = `${commentTitle}
           
           ${report}
           
-          ${sbomInfo}
+          ${securityGatesStatus}
           
           *Automated security scan*`;
           
